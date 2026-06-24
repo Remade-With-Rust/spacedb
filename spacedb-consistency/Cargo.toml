@@ -1,0 +1,16 @@
+[package]
+name = "spacedb-consistency"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "SpaceDB Layer 3 — consistency tiers: an explicit, honest, per-field choice of Convergent (CRDT, default), Causal+ (session read-your-writes / monotonic reads over state vectors), or Strong (quorum, fail-safe under partition). Every op reports the level it actually achieved. Phase 1 SpaceDB Mission, M7."
+# Open-core (MIT), part of SpaceDB. Causal+ builds on spacedb-crdt's state
+# vectors; the Strong tier's cross-host transport is the M3/M4 seam.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# Causal+ reads use the convergent document's state-vector frontier + lag.
+spacedb-crdt = { workspace = true }

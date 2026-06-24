@@ -1,0 +1,58 @@
+[package]
+name = "spacedb-store"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "SpaceDB Layer 0 — the per-node storage primitive: an engine-agnostic, transactional, order-preserving typed key/value store (redb + in-memory engines) that everything in SpaceDB rests on. Phase 1 SpaceDB Mission, M1 / Slice 1. See 'docs/plans/(working) phase 1 spacedb mission.md'."
+# SpaceDB is open-core (MIT): MATA *uses* it, never depends-into it. No `mata-*` /
+# `maestro-*` / `iron-bank-*` dependency may appear in any spacedb-* crate. MATA-
+# specific capabilities enter through seams SpaceDB defines (KvEngine, KeyProvider,
+# …) and MATA implements in its proprietary hosted product.
+
+[lib]
+crate-type = ["rlib"]
+
+# Test-only helper for the crash/durability suite (tests/crash.rs): it commits a
+# baseline, opens an uncommitted write, then dies without running destructors to
+# simulate a crash. Built alongside the crate so the integration test can spawn it
+# via CARGO_BIN_EXE_spacedb_crash_helper.
+[[bin]]
+name = "spacedb_crash_helper"
+path = "src/bin/crash_helper.rs"
+
+[dependencies]
+# Compact, deterministic value codec. Determinism matters: encoded values feed
+# content-addressing (L2) and corroboration (L4) in later milestones, so the same
+# value must always serialize to the same bytes. `use-std` pulls in `to_allocvec`.
+postcard = { version = "1", features = ["use-std"] }
+
+# Derive support for caller-defined value types and our own on-wire structs.
+serde = { version = "1", features = ["derive"] }
+
+# The durable engine: MIT/Apache-2.0 (no BUSL in the customer product), stable
+# on-disk format, crash-tested, synchronous (no async/sync bridge). See mission L0.
+redb = "2"
+
+# The AEAD value boundary (S2): per-collection DEK encrypts rows; the DEK is
+# wrapped under the vault key. AES-256-GCM, mirroring the home-computer DEK
+# envelope. All RustCrypto — MIT/Apache, no BUSL, wasm-clean.
+aes-gcm = "0.10"
+rand = "0.8"
+zeroize = { version = "1.7", features = ["derive"] }
+
+# Content-addressing for large-value externalization (S3): values over the
+# threshold are hashed and handed to L2 rather than bloating the B-tree. BLAKE3 is
+# MATA's content-address hash (ADR 0006 / MATA Network) — pure Rust, MIT/Apache.
+blake3 = "1"
+
+# Typed errors.
+thiserror = "1"
+
+[dev-dependencies]
+# Property tests for the codec laws (round-trip + order-preservation) and the
+# cross-engine equivalence suite.
+proptest = "1"
+
+# Scratch files for the redb-backed engine + crash/durability tests.
+tempfile = "3"

@@ -1,0 +1,19 @@
+[package]
+name = "spacedb-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "SpaceDB developer SDK — the one surface a developer picks up: an offline-first local replica with a per-field schema (CRDT type + consistency tier), mID-authorized + budgeted ops that each return their honest achieved consistency, reactive queries, and CRDT sync. Composes the whole SpaceDB stack. Phase 1 SpaceDB Mission, M8."
+# Open-core (MIT). The capstone: it depends on the SpaceDB layers and ties them
+# into one ergonomic API. No mata-* dependencies.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+spacedb-crdt = { workspace = true }
+spacedb-access = { workspace = true }
+spacedb-consistency = { workspace = true }
+spacedb-meter = { workspace = true }
+thiserror = "1"

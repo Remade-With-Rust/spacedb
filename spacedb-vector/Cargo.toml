@@ -1,0 +1,19 @@
+[package]
+name = "spacedb-vector"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "SpaceDB Layer 4 — the private-RAG substrate: an on-node vector index where a query embedding goes in and only top-k results come out (ids + scores), so the corpus never leaves the home. Retrieval is gated by an mID capability. Phase 1 SpaceDB Mission, M6."
+# Open-core (MIT), part of SpaceDB. Depends only on spacedb-access (for the
+# capability gate). Pure-Rust math — no heavy deps.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# Capability-gated retrieval: a search runs only under an authorized Decision.
+spacedb-access = { workspace = true }
+
+# Typed errors.
+thiserror = "1"

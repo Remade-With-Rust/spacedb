@@ -1,0 +1,32 @@
+[package]
+name = "spacedb-durability"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "SpaceDB Layer 2 (cold path) — mesh durability: seal a dataset into a content-addressed, Reed-Solomon erasure-coded snapshot and reconstruct it from any k-of-n surviving shards. The placement/shard-store/repair seams (M4-S2/S3) sit on top; MATA implements them over maestro-disco. Phase 1 SpaceDB Mission, M4."
+# Open-core (MIT). S1 is pure erasure/manifest primitives over opaque (already-
+# encrypted) snapshot bytes — no mata-* dependency, and no spacedb-* dependency
+# yet (the store/crdt/replica composition arrives with the higher slices).
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# Reed-Solomon k-of-n erasure coding (GF(2^8), up to 256 shards). MIT/Apache.
+reed-solomon-erasure = "6"
+
+# Content addressing for snapshots and shards (MATA's content-address hash).
+blake3 = "1"
+
+# Manifest (de)serialization.
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+
+# Typed errors.
+thiserror = "1"
+
+[dev-dependencies]
+# Fuzz the core durability invariant: any k-of-n survivors reconstruct the exact
+# original snapshot.
+proptest = "1"

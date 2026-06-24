@@ -1,0 +1,17 @@
+[package]
+name = "spacedb-console"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "SpaceDB operator console — the read-model behind the developer/ops dashboard. Turns raw fleet, access, audit and settlement observations into the four boards an operator runs a SpaceDB business from: fleet health, alerts, economics, and access. Native-testable core; a Dioxus/WASM shell binds it to a UI. Phase 1 SpaceDB Mission, M8."
+# Open-core (MIT). The console's brain — fed by observation DTOs (an adapter
+# maps live SDK/fleet/meter state into these), so it stays decoupled and tested.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# Shared economics vocabulary (the three resource rails).
+spacedb-meter = { workspace = true }

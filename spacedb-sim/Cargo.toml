@@ -1,0 +1,21 @@
+[package]
+name = "spacedb-sim"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "A deterministic discrete-event simulator for SpaceDB — a population of real CRDT replicas gossiping the real SyncMessage protocol over a modeled network (latency, loss, partition, churn). Same seed -> identical run. Tests convergence, durability, and honest state under load and noise. Phase 1 SpaceDB Mission, spacedb-sim S1."
+# Open-core (MIT). A digital twin of the DATABASE only — no maestro/iron-bank
+# (the full economic twin is the separate, proprietary mata-playground). It drives
+# the real crates through their seams; the RNG is hand-rolled for total determinism.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+spacedb-crdt = { workspace = true }
+spacedb-replica = { workspace = true }
+spacedb-durability = { workspace = true }
+spacedb-consistency = { workspace = true }
+spacedb-meter = { workspace = true }
+spacedb-console = { workspace = true }

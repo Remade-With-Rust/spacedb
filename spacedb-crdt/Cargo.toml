@@ -1,0 +1,38 @@
+[package]
+name = "spacedb-crdt"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "SpaceDB Layer 1 — convergent collections: the Y-CRDT (yrs) document model with a typed field->CRDT mapping (LWW-Register, PN-Counter, ...), local-first mutation, and order-independent merge. Phase 1 SpaceDB Mission, M2. See 'docs/plans/(working) phase 1 spacedb mission.md'."
+# Open-core (MIT), part of SpaceDB. No mata-*/maestro-*/iron-bank-* dependency:
+# this depends on `yrs` directly, never on the `mata-sync` crate.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# Y-CRDT in Rust — the convergent data model. Convergence correctness is yrs's
+# job; this crate owns the typed schema mapping over it. MIT, version-matched to
+# the workspace's existing yrs usage.
+yrs = "0.25"
+
+# Register values are serialized to JSON before being stored in the CRDT map, so a
+# field can hold any serde type while the CRDT only ever sees an opaque string.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SpaceDB's L0 storage primitive — persists CRDT document state, encrypted, into
+# the engine. Both are SpaceDB (open-core) crates; the no-mata-deps rule still
+# holds (spacedb-crdt -> spacedb-store, never a mata-* crate).
+spacedb-store = { workspace = true }
+
+# Typed errors.
+thiserror = "1"
+
+[dev-dependencies]
+# Fuzz the convergence property: random ops in random orders must converge.
+proptest = "1"
+
+# Scratch redb files for the persistence tests (redb-backed engine).
+tempfile = "3"

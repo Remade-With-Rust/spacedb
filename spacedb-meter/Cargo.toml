@@ -1,0 +1,17 @@
+[package]
+name = "spacedb-meter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "SpaceDB Layer 6 — metering & settlement: deterministic measurement of storage (bytes x time x replica_count), compute (fuel + invocations) and transit (bilaterally-corroborated served bytes), priced by a rate card and bounded by an agent budget. SpaceDB measures; the Settlement seam lets a host plug pricing + payout (e.g. MATA's maestro -> Iron Bank loop) underneath. Phase 1 SpaceDB Mission, M8."
+# Open-core (MIT), part of SpaceDB. No spacedb-*/mata-* deps — pure measurement.
+# The UsageClaim mirrors maestro's so a host adapter is a thin translation.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+thiserror = "1"

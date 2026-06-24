@@ -1,0 +1,32 @@
+[package]
+name = "spacedb-access"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "SpaceDB Layer 5 — identity & access: signed, scoped, expiring, revocable capabilities (ECDSA P-256 / ES256) that gate every read/write/compute. Inaccessible by default, accessible by mID-gated consent. The DID directory is a seam MATA implements over IAMHUMAN. Phase 1 SpaceDB Mission, M5."
+# Open-core (MIT). No mata-* dependency: identities are P-256 keys behind a
+# KeyDirectory seam; MATA resolves did:mata via IAMHUMAN, a self-hoster uses the
+# in-memory directory. ES256 matches mID so MATA's real mIDs verify identically.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# ECDSA P-256 / ES256 — the curve mID and WebAuthn use. default-features off to
+# match the workspace's mata-identity usage; ecdsa for sign/verify.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+
+# OS randomness for key + grant-id generation (same pattern as mata-identity).
+getrandom = "0.3"
+
+# Capability / signature (de)serialization; postcard gives the deterministic
+# canonical bytes the issuer signs over.
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+
+# Content-addressing + hash-chaining the audit log (MATA's content-address hash).
+blake3 = "1"
+
+# Typed errors.
+thiserror = "1"

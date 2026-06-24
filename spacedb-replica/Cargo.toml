@@ -1,0 +1,19 @@
+[package]
+name = "spacedb-replica"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "SpaceDB Layer 2 (hot path) — live convergence between replicas: the anti-entropy sync protocol over a Transport seam, with an in-process transport (and partition switch) for testing. MATA implements the transport over iroh+relay; a self-hoster can implement it over iroh directly. Phase 1 SpaceDB Mission, M3."
+# Open-core (MIT). Depends on spacedb-crdt only; the network transport is a seam
+# (`Transport`) an operator implements — never a mata-* dependency here.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# The convergent document + its sync primitives (state vector / delta / merge).
+spacedb-crdt = { workspace = true }
+
+# Typed errors.
+thiserror = "1"

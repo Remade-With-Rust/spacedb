@@ -1,0 +1,36 @@
+# SpaceDB — a local-first, CRDT-native, mesh-replicated database with no data center.
+#
+# Open source, dual-licensed MIT OR Apache-2.0. Embed it and run it locally for free;
+# distribute it across the mesh with MATA disco (https://disco.mata.network). See README.
+[workspace]
+resolver = "2"
+members = [
+    "spacedb-store",
+    "spacedb-crdt",
+    "spacedb-replica",
+    "spacedb-durability",
+    "spacedb-access",
+    "spacedb-query",
+    "spacedb-vector",
+    "spacedb-consistency",
+    "spacedb-meter",
+    "spacedb-sdk",
+    "spacedb-console",
+    "spacedb-sim",
+]
+
+# The crates inherit only each other from the workspace (every third-party dependency is
+# declared inline, with a version, in each crate). So this list is the whole graph.
+[workspace.dependencies]
+spacedb-store = { path = "spacedb-store", version = "0.1.0" }
+spacedb-crdt = { path = "spacedb-crdt", version = "0.1.0" }
+spacedb-replica = { path = "spacedb-replica", version = "0.1.0" }
+spacedb-durability = { path = "spacedb-durability", version = "0.1.0" }
+spacedb-access = { path = "spacedb-access", version = "0.1.0" }
+spacedb-query = { path = "spacedb-query", version = "0.1.0" }
+spacedb-vector = { path = "spacedb-vector", version = "0.1.0" }
+spacedb-consistency = { path = "spacedb-consistency", version = "0.1.0" }
+spacedb-meter = { path = "spacedb-meter", version = "0.1.0" }
+spacedb-sdk = { path = "spacedb-sdk", version = "0.1.0" }
+spacedb-console = { path = "spacedb-console", version = "0.1.0" }
+spacedb-sim = { path = "spacedb-sim", version = "0.1.0" }

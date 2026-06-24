@@ -1,0 +1,49 @@
+[package]
+name = "spacedb-query"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/spacedb"
+description = "SpaceDB Layer 4 — compute-to-data: run a deterministic, fuel/memory-bounded WASM function next to the data and return a verifiable, corroboratable result. The query travels to the data; only the answer travels back. Phase 1 SpaceDB Mission, M6."
+# Open-core (MIT). Built on wasmtime directly (the engine MATA's maestro-fn-runtime
+# wraps) — no mata-* dependency. Redundant placement of corroboration runs across
+# the marketplace is a MATA seam; the runtime + attestation + corroboration are ours.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# The WASM engine. Fuel metering + StoreLimits give deterministic bounds; cranelift
+# compiles the module. default-features off drops the on-disk cache (zstd-sys C dep);
+# we re-enable only what the runtime exercises.
+# cranelift compiles the module at load; runtime executes it with fuel + memory
+# bounds. `gc` is intentionally omitted — our functions are integer/byte logic with
+# no reference types, and enabling `gc` would require a collector backend feature.
+# wasmtime 29+ (not 27) — 27's fuel `out_of_gas` trap used an unwinding longjmp
+# that aborts on Windows/MSVC (/GS stack-cookie); 29 reworked trap handling.
+# Minimal features: cranelift compiles, runtime + std + signals-based-traps give
+# recoverable traps. `cache` (zstd-sys C dep) and `gc` (no reference types) stay off.
+wasmtime = { version = "29", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+    "signals-based-traps",
+] }
+
+# Content-addressing the workload / input / output (MATA's content-address hash).
+blake3 = "1"
+
+# The attestation (de)serializes for transport + signing.
+serde = { version = "1", features = ["derive"] }
+
+# Typed errors.
+thiserror = "1"
+
+[dev-dependencies]
+# Compile the WAT test fixtures to real `.wasm` bytes (what production deploys).
+wat = "1"
+# Verify attestation digests in tests.
+blake3 = "1"
+# Demonstrate pinning a query snapshot from a convergent document (the lib stays
+# decoupled from spacedb-crdt; only the integration test composes them).
+spacedb-crdt = { workspace = true }
