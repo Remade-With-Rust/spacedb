@@ -13,7 +13,7 @@
 //! - **Newer version** → **refuse** with [`StoreError::SchemaTooNew`]. Reading a
 //!   format written by newer software risks silent misinterpretation, so we stop.
 //!
-//! This is the same discipline as the home-computer `dek_wrappings` format gate,
+//! This is the same discipline as MATA's `dek_wrappings` format gate,
 //! generalized to the whole store.
 //!
 //! Migrations must be **idempotent**: the version is stamped only after all steps

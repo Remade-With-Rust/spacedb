@@ -354,6 +354,17 @@ impl CrdtDoc {
 
     /// Encode the updates this document has that a peer at `their_state_vector`
     /// does not — the delta to bring that peer up to date (anti-entropy).
+    ///
+    /// **Only encode from the document that actually owns the data.** This is the
+    /// correct anti-entropy primitive when a replica answers a peer's state vector
+    /// with a delta from its *own* store. Do **not** use it to build a relay or
+    /// fan-out — i.e. do not apply deltas into a separate "relay" document and then
+    /// re-encode them with this method. Re-encoding state through a relay doc can
+    /// silently **drop a record** for some actor-id orderings, because the relay
+    /// recomputes the delta from its own (re-ordered) state instead of forwarding
+    /// what it received. For relay / fan-out / append-to-a-sync-log scenarios, use
+    /// [`take_local_updates`](Self::take_local_updates) and forward each raw update
+    /// **verbatim** — those apply idempotently and never re-encode.
     pub fn encode_update_since(&self, their_state_vector: &[u8]) -> CrdtResult<Vec<u8>> {
         let sv = StateVector::decode_v1(their_state_vector)
             .map_err(|e| CrdtError::DecodeStateVector(e.to_string()))?;

@@ -10,7 +10,7 @@
 //! time, then bisect a regression against it.
 //!
 //! It is a twin of the **database** only — open-core, no maestro/Iron-Bank (the full
-//! economic twin is the separate, proprietary `mata-playground`). Live state can be
+//! economic twin is a separate, proprietary system). Live state can be
 //! rendered through [`observations`] into the `spacedb-console` dashboard.
 //!
 //! ```

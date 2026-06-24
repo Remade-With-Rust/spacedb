@@ -2,7 +2,7 @@
 //!
 //! SpaceDB stores **opaque ciphertext**; the engine never sees plaintext. This
 //! module owns the crypto that makes that true, mirroring the shipped, audited
-//! home-computer `dek_manager` envelope:
+//! MATA `dek_manager` envelope:
 //!
 //! - Each **collection** has a random 32-byte **DEK** (data encryption key) that
 //!   encrypts its rows.
