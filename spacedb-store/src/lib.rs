@@ -42,7 +42,11 @@ pub use engine::{Durability, KvEngine, ReadTx, Readable, WriteTx};
 pub mod mem_engine;
 pub use mem_engine::MemEngine;
 
+// Native-only: redb needs real file I/O. Wasm builds use `MemEngine`; the host
+// environment persists snapshots (e.g. IndexedDB in a browser) via its own adapter.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod redb_engine;
+#[cfg(not(target_arch = "wasm32"))]
 pub use redb_engine::RedbEngine;
 
 pub mod table;
@@ -65,3 +69,10 @@ pub use meta::{
 
 pub mod extern_value;
 pub use extern_value::{classify, content_hash, should_externalize, ExternRef, ValuePlacement};
+
+/// Compiles the README's examples as doctests, so the documented API can never
+/// drift from the real one. Not part of the public API, and not rendered into
+/// the crate docs — it exists only under `cargo test --doc`.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;

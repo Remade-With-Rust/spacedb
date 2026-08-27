@@ -16,11 +16,20 @@
 //! dialog; for redb's durability guarantee the two are equivalent — neither
 //! flushes the uncommitted transaction, and the committed one is already fsynced.
 
+// The helper drives the redb engine, which is native-only; on wasm this bin is an
+// empty stub so `cargo check --target wasm32-unknown-unknown` stays green.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
+#[cfg(not(target_arch = "wasm32"))]
 use std::process;
 
+#[cfg(not(target_arch = "wasm32"))]
 use spacedb_store::{Durability, KvEngine, RedbEngine, Table, WriteTx};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let path = std::env::args()
         .nth(1)

@@ -1,9 +1,15 @@
 [package]
 name = "spacedb-crdt"
-version = "0.1.0"
+version = "0.5.2"
 edition = "2021"
+readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Remade-With-Rust/spacedb"
+authors = ["Mata Network"]
+homepage = "https://www.mata.network/"
+documentation = "https://docs.rs/spacedb-crdt"
+keywords = ["crdt", "database", "local-first", "sync", "offline-first"]
+categories = ["data-structures", "database-implementations"]
 description = "SpaceDB Layer 1 — convergent collections: the Y-CRDT (yrs) document model with a typed field->CRDT mapping (LWW-Register, PN-Counter, ...), local-first mutation, and order-independent merge. Phase 1 SpaceDB Mission, M2. See 'docs/plans/(working) phase 1 spacedb mission.md'."
 # Open-core (MIT), part of SpaceDB. No mata-*/maestro-*/iron-bank-* dependency:
 # this depends on `yrs` directly, never on the `mata-sync` crate.
@@ -29,6 +35,12 @@ spacedb-store = { workspace = true }
 
 # Typed errors.
 thiserror = "1"
+
+# On wasm32-unknown-unknown, `yrs` → `fastrand` rides getrandom 0.3, whose browser
+# backend is the `wasm_js` feature (paired with the `getrandom_backend="wasm_js"`
+# rustflag the consuming build sets — this workspace's .cargo/config.toml does).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 # Fuzz the convergence property: random ops in random orders must converge.

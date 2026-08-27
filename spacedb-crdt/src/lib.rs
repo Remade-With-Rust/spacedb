@@ -29,3 +29,10 @@ pub use persist::{CrdtStore, CRDT_DOCS_COLLECTION};
 
 mod compact;
 pub use compact::compact_updates;
+
+/// Compiles the README's examples as doctests, so the documented API can never
+/// drift from the real one. Not part of the public API, and not rendered into
+/// the crate docs — it exists only under `cargo test --doc`.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;

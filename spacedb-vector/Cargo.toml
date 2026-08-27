@@ -1,9 +1,15 @@
 [package]
 name = "spacedb-vector"
-version = "0.1.0"
+version = "0.5.2"
 edition = "2021"
+readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Remade-With-Rust/spacedb"
+authors = ["Mata Network"]
+homepage = "https://www.mata.network/"
+documentation = "https://docs.rs/spacedb-vector"
+keywords = ["vector", "embeddings", "search", "rag", "knn"]
+categories = ["database", "algorithms"]
 description = "SpaceDB Layer 4 — the private-RAG substrate: an on-node vector index where a query embedding goes in and only top-k results come out (ids + scores), so the corpus never leaves the home. Retrieval is gated by an mID capability. Phase 1 SpaceDB Mission, M6."
 # Open-core (MIT), part of SpaceDB. Depends only on spacedb-access (for the
 # capability gate). Pure-Rust math — no heavy deps.

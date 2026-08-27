@@ -1,9 +1,15 @@
 [package]
 name = "spacedb-access"
-version = "0.1.0"
+version = "0.5.2"
 edition = "2021"
+readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Remade-With-Rust/spacedb"
+authors = ["Mata Network"]
+homepage = "https://www.mata.network/"
+documentation = "https://docs.rs/spacedb-access"
+keywords = ["capabilities", "authorization", "did", "access-control", "mid"]
+categories = ["cryptography", "authentication"]
 description = "SpaceDB Layer 5 — identity & access: signed, scoped, expiring, revocable capabilities (ECDSA P-256 / ES256) that gate every read/write/compute. Inaccessible by default, accessible by mID-gated consent. The DID directory is a seam MATA implements over IAMHUMAN. Phase 1 SpaceDB Mission, M5."
 # Open-core (MIT). No mata-* dependency: identities are P-256 keys behind a
 # KeyDirectory seam; MATA resolves did:mata via IAMHUMAN, a self-hoster uses the

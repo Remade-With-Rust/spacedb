@@ -73,6 +73,12 @@ impl Default for FunctionRuntime {
 }
 
 impl FunctionRuntime {
+    /// The shared wasmtime engine (fuel-metered, backtrace-free) — reused by the
+    /// Database-Function path in [`crate::functions`].
+    pub(crate) fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
     pub fn new() -> Self {
         let mut config = Config::new();
         config.consume_fuel(true);

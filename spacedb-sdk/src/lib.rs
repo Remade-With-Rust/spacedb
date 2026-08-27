@@ -25,6 +25,51 @@
 //!
 //! Open-core (MIT). Composes `spacedb-crdt`, `-access`, `-consistency`, `-meter`.
 
+
+/// The pure-Rust global allocator, installed process-wide.
+///
+/// Present with the **default** `rusty-alloc` feature. SpaceDB is a distributed
+/// database whose replicas routinely run on machines their operator does not
+/// control, so the allocator is part of the failure surface, not an
+/// implementation detail: a double free **aborts** instead of corrupting the
+/// heap, and the tree carries no C allocator. An unconfigured node should be the
+/// hardened one, so this is opt-**out**:
+///
+/// ```toml
+/// spacedb-sdk = { version = "0.5", default-features = false }  # bring your own
+/// spacedb-sdk = { version = "0.5", features = ["secure"] }     # + guard pages
+/// ```
+///
+/// Disabling it removes `rusty_alloc` from the dependency graph entirely, not
+/// merely from a `cfg`, leaving you free to declare your own.
+///
+/// ## If you are writing a LIBRARY that depends on this crate
+///
+/// Set `default-features = false`. A program may contain exactly **one**
+/// `#[global_allocator]`, and Cargo features are **additive across the whole
+/// dependency graph** — a library that pulled this crate with defaults on would
+/// impose this allocator on every application downstream, and any application
+/// that had already chosen its own would fail to build with
+/// `the #[global_allocator] in this crate conflicts with global allocator in:
+/// spacedb_sdk`, which it could not fix from its own manifest.
+#[cfg(feature = "rusty-alloc")]
+#[global_allocator]
+static GLOBAL: rusty_alloc_api::RustyAlloc = rusty_alloc_api::RustyAlloc;
+
+/// Whether this build installed `rusty_alloc` as the global allocator.
+///
+/// Worth logging at node startup: the allocator is a deployment property, and a
+/// property you cannot observe is one you cannot verify.
+pub const fn rusty_alloc_enabled() -> bool {
+    cfg!(feature = "rusty-alloc")
+}
+
+/// Whether the hardened `secure` profile (guard pages, encrypted free lists) is
+/// compiled in.
+pub const fn secure_allocator_enabled() -> bool {
+    cfg!(feature = "secure")
+}
+
 mod schema;
 pub use schema::{CrdtType, FieldSpec, Schema};
 
@@ -44,3 +89,10 @@ pub use spacedb_access::{
 pub use spacedb_consistency::{Outcome, RejectReason, StrongResult, Tier, UnavailableReason};
 pub use spacedb_crdt::Watcher;
 pub use spacedb_meter::Budget;
+
+/// Compiles the README's examples as doctests, so the documented API can never
+/// drift from the real one. Not part of the public API, and not rendered into
+/// the crate docs — it exists only under `cargo test --doc`.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;

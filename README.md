@@ -1,5 +1,11 @@
 # SpaceDB
 
+[![crates.io](https://img.shields.io/crates/v/spacedb-sdk?logo=rust&label=spacedb-sdk)](https://crates.io/crates/spacedb-sdk)
+[![docs.rs](https://img.shields.io/docsrs/spacedb-sdk?logo=docsdotrs)](https://docs.rs/spacedb-sdk)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/LICENSE-MIT)
+[![Remade With Rust](https://img.shields.io/badge/Remade%20With-Rust-000?logo=rust&logoColor=fff)](https://github.com/Remade-With-Rust)
+[![By Mata Network](https://img.shields.io/badge/by-Mata%20Network-5b2be0)](https://www.mata.network/)
+
 **A local-first, CRDT-native, mesh-replicated database with no data center.**
 
 Your app's data lives encrypted across machines near your users — available
@@ -21,12 +27,16 @@ is the product. So: **integrate locally with SpaceDB, distribute with disco.**
 
 ## Quick start
 
-Add the SDK — it's the one crate you need; it composes the whole stack:
+Add the SDK — it's the one crate you need; it composes the whole stack **and**
+installs a hardened, pure-Rust allocator by default:
 
 ```toml
 [dependencies]
-spacedb-sdk = "0.1"
+spacedb-sdk = "0.5"
 ```
+
+> **Writing a library rather than an application?** Add
+> `default-features = false` — see [Memory allocation](#memory-allocation-rusty_alloc).
 
 ```rust
 use spacedb_sdk::{
@@ -105,6 +115,62 @@ if watcher.drain_changed() { /* re-render */ }
 
 ---
 
+## Memory allocation (`rusty_alloc`)
+
+**`spacedb-sdk` installs [`rusty_alloc`](https://github.com/remade-with-rust/rusty_alloc)
+as the process-wide allocator by default, and we highly recommend leaving it on
+for any distributed deployment.**
+
+SpaceDB is a *distributed* database: replicas routinely run on machines their
+operator does not control. On that hardware the allocator is part of the failure
+surface, not an implementation detail:
+
+| property | why it matters on a node you don't own |
+|---|---|
+| **Double free aborts** instead of corrupting the heap (~0.4% overhead) | A memory bug becomes a crash you can see, rather than silent divergence you cannot trust. A replica that corrupts its own heap is a replica that lies to the mesh. |
+| **Pure Rust — no C allocator in the tree** | The allocator underneath a database holding other people's encrypted data is code we can audit, and it is the last major C dependency `std` drags in. |
+| **`secure` feature**: guard pages + encrypted free lists | Adds ~4–7% instructions (measured) and is worth it for nodes taking untrusted input. |
+| **One allocator across every target** | It runs on Linux, macOS, Windows and `wasm32` (no emscripten), so a node behaves the same wherever it is placed. |
+
+An unconfigured node should be the hardened one, so this is opt-**out**:
+
+```toml
+# Bring your own allocator (jemalloc, mimalloc, the system one, …)
+spacedb-sdk = { version = "0.5", default-features = false }
+```
+
+That genuinely removes `rusty_alloc` from the dependency graph — not merely from
+a `cfg` — leaving you free to declare your own `#[global_allocator]`. The full
+API is re-exported either way.
+
+For the hardened node profile:
+
+```toml
+spacedb-sdk = { version = "0.5", features = ["secure"] }
+```
+
+### Library authors: opt out
+
+```toml
+[dependencies]
+spacedb-sdk = { version = "0.5", default-features = false }
+```
+
+This is a real Cargo behaviour, not a style preference. A program may contain
+exactly **one** `#[global_allocator]`, and Cargo features are **additive across
+the entire dependency graph**. If a *library* depended on `spacedb-sdk` with
+default features, every application using it would inherit this allocator — and
+any application that had already chosen its own would fail to build with:
+
+```
+error: the `#[global_allocator]` in this crate conflicts with global allocator in: spacedb_sdk
+```
+
+…which it could not fix from its own manifest. **Applications** decide the
+allocator; **libraries** should stay out of that decision. MATA's own crates do
+exactly this — the workspace pins `spacedb-sdk` with `default-features = false`
+and installs the allocator at the binary instead.
+
 ## The layers
 
 One crate per layer; `spacedb-sdk` ties them together. Each defines a **seam** an
@@ -113,17 +179,20 @@ operator implements for the hosted product — the dependency arrow is
 
 | Crate | Layer | What it gives you | Seam an operator fills |
 |---|---|---|---|
-| `spacedb-store` | L0 storage | encrypted KV, typed tables | `KvEngine`, `KeyProvider` (vault) |
-| `spacedb-crdt` | L1 data | convergent docs, reactive queries | — |
-| `spacedb-replica` | L2 sync | anti-entropy sync, honest freshness | `Transport` (iroh/relay) |
-| `spacedb-durability` | L2 mesh | erasure shards, placement, self-repair | `ShardStore`, placement |
-| `spacedb-access` | L5 access | mID capabilities, delegation, audit | `KeyDirectory` (mID/IAMHUMAN) |
-| `spacedb-query` | L4 compute | deterministic compute-to-data + attest | redundant placement |
-| `spacedb-vector` | L4 RAG | on-node top-k; corpus never leaves | — |
-| `spacedb-consistency` | L3 tiers | convergent / causal+ / strong | strong-tier placement |
-| `spacedb-meter` | L6 economics | metering, pricing, budgets | `Settlement` → Iron Bank |
-| `spacedb-sdk` | — | **the developer surface** (above) | — |
-| `spacedb-console` | — | operator dashboard read-model | live observation adapters |
+| [`spacedb-store`](spacedb-store/) | L0 storage | encrypted KV, typed tables | `KvEngine`, `KeyProvider` (vault) |
+| [`spacedb-crdt`](spacedb-crdt/) | L1 data | convergent docs, reactive queries | — |
+| [`spacedb-replica`](spacedb-replica/) | L2 sync | anti-entropy sync, honest freshness | `Transport` (iroh/relay) |
+| [`spacedb-durability`](spacedb-durability/) | L2 mesh | erasure shards, placement, self-repair | `ShardStore`, placement |
+| [`spacedb-access`](spacedb-access/) | L5 access | mID capabilities, delegation, audit | `KeyDirectory` (mID/IAMHUMAN) |
+| [`spacedb-query`](spacedb-query/) | L4 compute | deterministic compute-to-data + attest | redundant placement |
+| [`spacedb-vector`](spacedb-vector/) | L4 RAG | on-node top-k; corpus never leaves | — |
+| [`spacedb-consistency`](spacedb-consistency/) | L3 tiers | convergent / causal+ / strong | strong-tier placement |
+| [`spacedb-meter`](spacedb-meter/) | L6 economics | metering, pricing, budgets | `Settlement` → Iron Bank |
+| [`spacedb-sdk`](spacedb-sdk/) | — | **the developer surface** (above) — hardened allocator by default; `default-features = false` to bring your own | — |
+| [`spacedb-console`](spacedb-console/) | — | operator dashboard read-model | live observation adapters |
+| [`spacedb-sim`](spacedb-sim/) | — | deterministic digital twin (testing) | — |
+
+Each crate's README covers its own API, guarantees, and seams.
 
 ---
 

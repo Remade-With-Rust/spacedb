@@ -20,15 +20,15 @@ members = [
 ]
 
 [workspace.dependencies]
-spacedb-store = { path = "spacedb-store", version = "0.1.0" }
-spacedb-crdt = { path = "spacedb-crdt", version = "0.1.0" }
-spacedb-replica = { path = "spacedb-replica", version = "0.1.0" }
-spacedb-durability = { path = "spacedb-durability", version = "0.1.0" }
-spacedb-access = { path = "spacedb-access", version = "0.1.0" }
-spacedb-query = { path = "spacedb-query", version = "0.1.0" }
-spacedb-vector = { path = "spacedb-vector", version = "0.1.0" }
-spacedb-consistency = { path = "spacedb-consistency", version = "0.1.0" }
-spacedb-meter = { path = "spacedb-meter", version = "0.1.0" }
-spacedb-sdk = { path = "spacedb-sdk", version = "0.1.0" }
-spacedb-console = { path = "spacedb-console", version = "0.1.0" }
-spacedb-sim = { path = "spacedb-sim", version = "0.1.0" }
+spacedb-store = { path = "spacedb-store", version = "0.5.2" }
+spacedb-crdt = { path = "spacedb-crdt", version = "0.5.2" }
+spacedb-replica = { path = "spacedb-replica", version = "0.5.2" }
+spacedb-durability = { path = "spacedb-durability", version = "0.5.2" }
+spacedb-access = { path = "spacedb-access", version = "0.5.2" }
+spacedb-query = { path = "spacedb-query", version = "0.5.2" }
+spacedb-vector = { path = "spacedb-vector", version = "0.5.2" }
+spacedb-consistency = { path = "spacedb-consistency", version = "0.5.2" }
+spacedb-meter = { path = "spacedb-meter", version = "0.5.2" }
+spacedb-sdk = { path = "spacedb-sdk", version = "0.5.2" }
+spacedb-console = { path = "spacedb-console", version = "0.5.2" }
+spacedb-sim = { path = "spacedb-sim", version = "0.5.2" }

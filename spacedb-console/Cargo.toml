@@ -1,9 +1,15 @@
 [package]
 name = "spacedb-console"
-version = "0.1.0"
+version = "0.5.2"
 edition = "2021"
+readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Remade-With-Rust/spacedb"
+authors = ["Mata Network"]
+homepage = "https://www.mata.network/"
+documentation = "https://docs.rs/spacedb-console"
+keywords = ["console", "observability", "dashboard", "database", "metrics"]
+categories = ["database", "visualization"]
 description = "SpaceDB operator console — the read-model behind the developer/ops dashboard. Turns raw fleet, access, audit and settlement observations into the four boards an operator runs a SpaceDB business from: fleet health, alerts, economics, and access. Native-testable core; a Dioxus/WASM shell binds it to a UI. Phase 1 SpaceDB Mission, M8."
 # Open-core (MIT). The console's brain — fed by observation DTOs (an adapter
 # maps live SDK/fleet/meter state into these), so it stays decoupled and tested.

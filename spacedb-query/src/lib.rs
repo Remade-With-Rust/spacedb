@@ -27,8 +27,18 @@ pub use corroborate::{corroborate, Corroboration, FunctionRun};
 mod runtime;
 pub use runtime::{Execution, FunctionRuntime, RunLimits};
 
+mod functions;
+pub use functions::{CtxRights, FunctionCtx, FunctionOutcome, RecordSnapshot};
+
 mod snapshot;
 pub use snapshot::Snapshot;
 
 mod planner;
 pub use planner::{run_query, Coverage, QueryOutcome, QueryPlan, Shard};
+
+/// Compiles the README's examples as doctests, so the documented API can never
+/// drift from the real one. Not part of the public API, and not rendered into
+/// the crate docs — it exists only under `cargo test --doc`.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;

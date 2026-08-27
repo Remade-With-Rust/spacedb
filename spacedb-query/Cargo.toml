@@ -1,9 +1,15 @@
 [package]
 name = "spacedb-query"
-version = "0.1.0"
+version = "0.5.2"
 edition = "2021"
+readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Remade-With-Rust/spacedb"
+authors = ["Mata Network"]
+homepage = "https://www.mata.network/"
+documentation = "https://docs.rs/spacedb-query"
+keywords = ["query", "compute", "database", "deterministic", "wasm"]
+categories = ["database", "wasm"]
 description = "SpaceDB Layer 4 — compute-to-data: run a deterministic, fuel/memory-bounded WASM function next to the data and return a verifiable, corroboratable result. The query travels to the data; only the answer travels back. Phase 1 SpaceDB Mission, M6."
 # Open-core (MIT). Built on wasmtime directly (the engine MATA's maestro-fn-runtime
 # wraps) — no mata-* dependency. Redundant placement of corroboration runs across
