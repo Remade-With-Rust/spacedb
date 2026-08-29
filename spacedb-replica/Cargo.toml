@@ -1,6 +1,6 @@
 [package]
 name = "spacedb-replica"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.95"
 readme = "README.md"
