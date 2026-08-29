@@ -66,12 +66,6 @@ pub struct FunctionRuntime {
     engine: Engine,
 }
 
-impl Default for FunctionRuntime {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl FunctionRuntime {
     /// The shared wasmtime engine (fuel-metered, backtrace-free) — reused by the
     /// Database-Function path in [`crate::functions`].
@@ -79,15 +73,18 @@ impl FunctionRuntime {
         &self.engine
     }
 
-    pub fn new() -> Self {
+    /// Construct the runtime. Fails as [`QueryError::Engine`] if wasmtime rejects
+    /// the configuration on this host — a consumer gets an error to handle, not a
+    /// panic.
+    pub fn new() -> QueryResult<Self> {
         let mut config = Config::new();
         config.consume_fuel(true);
         // We only need traps as recoverable errors, not stack traces. Capturing a
         // wasm backtrace on trap walks native frames, which aborts on Windows with
         // this slim feature set — and a determinism-bound runtime has no use for it.
         config.wasm_backtrace(false);
-        let engine = Engine::new(&config).expect("wasmtime engine (fuel) construction");
-        Self { engine }
+        let engine = Engine::new(&config).map_err(|e| QueryError::Engine(e.to_string()))?;
+        Ok(Self { engine })
     }
 
     /// Run `module_wasm`'s `run` entry over `input` under `limits`, returning the

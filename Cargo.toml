@@ -21,7 +21,7 @@ members = [
 
 [workspace.dependencies]
 spacedb-store = { path = "spacedb-store", version = "0.5.2" }
-spacedb-crdt = { path = "spacedb-crdt", version = "0.5.3" }
+spacedb-crdt = { path = "spacedb-crdt", version = "0.5.2" }
 spacedb-replica = { path = "spacedb-replica", version = "0.5.2" }
 spacedb-durability = { path = "spacedb-durability", version = "0.5.2" }
 spacedb-access = { path = "spacedb-access", version = "0.5.2" }

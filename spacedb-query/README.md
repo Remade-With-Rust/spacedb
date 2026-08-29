@@ -29,7 +29,7 @@ use spacedb_query::{FunctionRuntime, RunLimits};
 let module_wasm: Vec<u8> = Vec::new();   // a real deterministic WASM module
 let input_bytes: Vec<u8> = Vec::new();
 
-let runtime = FunctionRuntime::new();
+let runtime = FunctionRuntime::new().unwrap();
 let limits = RunLimits { max_fuel: 100_000_000, max_mem_mb: 64 };
 
 let exec = runtime.run(&module_wasm, &input_bytes, &limits).unwrap();
@@ -85,7 +85,7 @@ exposed as a `writes_digest` rather than applied behind the caller's back.
 ```rust,ignore
 use spacedb_query::{run_query, FunctionRuntime, QueryPlan, RunLimits, Shard, Snapshot};
 
-let runtime = FunctionRuntime::new();
+let runtime = FunctionRuntime::new().unwrap();
 let plan = QueryPlan {
     map_wasm: &map_wasm,
     reduce_wasm: &reduce_wasm,

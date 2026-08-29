@@ -2,6 +2,7 @@
 name = "spacedb-durability"
 version = "0.5.2"
 edition = "2021"
+rust-version = "1.95"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Remade-With-Rust/spacedb"
@@ -19,8 +20,11 @@ description = "SpaceDB Layer 2 (cold path) — mesh durability: seal a dataset i
 crate-type = ["rlib"]
 
 [dependencies]
-# Reed-Solomon k-of-n erasure coding (GF(2^8), up to 256 shards). MIT/Apache.
-reed-solomon-erasure = "6"
+# Reed-Solomon k-of-n erasure coding (GF(2^8), up to 256 shards), pure Rust with
+# runtime-dispatched SIMD kernels. Uses the klauspost construction, byte-compatible
+# with `reed-solomon-erasure` in both directions, so shards written before the
+# migration remain recoverable and vice versa. MIT/Apache.
+rusty_erasure = "0.4"
 
 # Content addressing for snapshots and shards (MATA's content-address hash).
 blake3 = "1"
@@ -36,3 +40,8 @@ thiserror = "1"
 # Fuzz the core durability invariant: any k-of-n survivors reconstruct the exact
 # original snapshot.
 proptest = "1"
+
+# The migration oracle: cross-decode tests prove shards encode/recover
+# byte-identically against the crate this one replaced (klauspost construction).
+# Remove after one published release survives in the wild.
+reed-solomon-erasure = "6"

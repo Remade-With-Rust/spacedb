@@ -77,7 +77,7 @@ fn plan<'a>(map: &'a [u8], reduce: &'a [u8]) -> QueryPlan<'a> {
 
 #[test]
 fn map_reduces_across_shards_with_full_coverage() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let map = wasm(SUM_MAP_WAT);
     let reduce = wasm(SUM_REDUCE_WAT);
     let shards = vec![
@@ -95,7 +95,7 @@ fn map_reduces_across_shards_with_full_coverage() {
 
 #[test]
 fn a_partition_yields_a_partial_result_flagged_with_coverage() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let map = wasm(SUM_MAP_WAT);
     let reduce = wasm(SUM_REDUCE_WAT);
     let shards = vec![
@@ -113,7 +113,7 @@ fn a_partition_yields_a_partial_result_flagged_with_coverage() {
 
 #[test]
 fn the_reduce_is_order_independent() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let map = wasm(SUM_MAP_WAT);
     let reduce = wasm(SUM_REDUCE_WAT);
     let forward = vec![shard("a", &[1, 2, 3]), shard("b", &[10, 20]), shard("c", &[100, 4])];
@@ -126,7 +126,7 @@ fn the_reduce_is_order_independent() {
 
 #[test]
 fn no_reachable_shards_yields_no_output() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let map = wasm(SUM_MAP_WAT);
     let reduce = wasm(SUM_REDUCE_WAT);
     let shards = vec![
@@ -142,7 +142,7 @@ fn no_reachable_shards_yields_no_output() {
 
 #[test]
 fn pins_a_consistent_snapshot_of_a_convergent_document() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let map = wasm(SUM_MAP_WAT);
     let reduce = wasm(SUM_REDUCE_WAT);
 

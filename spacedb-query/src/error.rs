@@ -6,6 +6,11 @@ pub type QueryResult<T> = Result<T, QueryError>;
 
 #[derive(Debug, Error)]
 pub enum QueryError {
+    /// The wasmtime engine could not be constructed with the runtime's
+    /// deterministic configuration (fuel metering, no backtraces).
+    #[error("engine construction failed: {0}")]
+    Engine(String),
+
     /// The WASM module failed to compile.
     #[error("module compile failed: {0}")]
     Compile(String),

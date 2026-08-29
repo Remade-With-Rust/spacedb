@@ -78,7 +78,7 @@ fn ctx(snap: RecordSnapshot, rights: CtxRights, denied: &[&str]) -> FunctionCtx 
 
 #[test]
 fn a_function_buffers_writes_and_reads_its_own_writes() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let wasm = wat::parse_str(PUT_GET_WAT).unwrap();
 
     let out = rt
@@ -100,7 +100,7 @@ fn a_function_buffers_writes_and_reads_its_own_writes() {
 
 #[test]
 fn reads_come_from_the_pinned_snapshot() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let wasm = wat::parse_str(GET_WAT).unwrap();
 
     let hit = rt
@@ -121,7 +121,7 @@ fn reads_come_from_the_pinned_snapshot() {
 
 #[test]
 fn the_determinism_contract_extends_to_mutations() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let wasm = wat::parse_str(PUT_GET_WAT).unwrap();
     let snap = snapshot(&[("c", "seed", b"x")]);
 
@@ -154,7 +154,7 @@ fn the_determinism_contract_extends_to_mutations() {
 
 #[test]
 fn rights_are_checked_per_host_call() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let put_wasm = wat::parse_str(PUT_GET_WAT).unwrap();
     let get_wasm = wat::parse_str(GET_WAT).unwrap();
 
@@ -175,7 +175,7 @@ fn rights_are_checked_per_host_call() {
 
 #[test]
 fn zero_knowledge_collections_are_refused() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let wasm = wat::parse_str(GET_WAT).unwrap();
     let err = rt
         .run_with_ctx(
@@ -190,7 +190,7 @@ fn zero_knowledge_collections_are_refused() {
 
 #[test]
 fn a_trapped_run_still_surfaces_no_write_set() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let wasm = wat::parse_str(PUT_THEN_TRAP_WAT).unwrap();
     // The run errors — there is no outcome, hence no write-set to apply. The put it
     // buffered before trapping dies with the run (all-or-nothing by construction).
@@ -202,7 +202,7 @@ fn a_trapped_run_still_surfaces_no_write_set() {
 
 #[test]
 fn deploy_validation_allows_only_the_host_call_import() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
 
     // The legit function validates.
     rt.validate_function(&wat::parse_str(PUT_GET_WAT).unwrap()).unwrap();

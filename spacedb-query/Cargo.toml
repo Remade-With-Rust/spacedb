@@ -2,6 +2,7 @@
 name = "spacedb-query"
 version = "0.5.2"
 edition = "2021"
+rust-version = "1.95"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Remade-With-Rust/spacedb"
@@ -25,15 +26,20 @@ crate-type = ["rlib"]
 # cranelift compiles the module at load; runtime executes it with fuel + memory
 # bounds. `gc` is intentionally omitted — our functions are integer/byte logic with
 # no reference types, and enabling `gc` would require a collector backend feature.
-# wasmtime 29+ (not 27) — 27's fuel `out_of_gas` trap used an unwinding longjmp
-# that aborts on Windows/MSVC (/GS stack-cookie); 29 reworked trap handling.
-# Minimal features: cranelift compiles, runtime + std + signals-based-traps give
-# recoverable traps. `cache` (zstd-sys C dep) and `gc` (no reference types) stay off.
-wasmtime = { version = "29", default-features = false, features = [
+# wasmtime 48 (was 29; 27 before that). 27's fuel `out_of_gas` trap unwound via
+# longjmp and ABORTED on Windows/MSVC under the /GS stack cookie, which is why
+# this crate moved to 29 for its reworked trap handling — the standing gate for
+# any bump here is that `fuel_exhaustion_traps_rather_than_running_forever` still
+# yields a RECOVERABLE trap on the MSVC target. `signals-based-traps` is gone as
+# a feature name after 29 (folded into default behaviour). 48 also clears the
+# wasmtime sandbox-escape advisories (RUSTSEC-2026-0095/0096 and siblings), which
+# matter here more than anywhere: this crate runs untrusted guest code on a node
+# its owner does not control, and it ships to crates.io.
+# `cache` (zstd-sys C dep) and `gc` (no reference types) stay off.
+wasmtime = { version = "48", default-features = false, features = [
     "cranelift",
     "runtime",
     "std",
-    "signals-based-traps",
 ] }
 
 # Content-addressing the workload / input / output (MATA's content-address hash).

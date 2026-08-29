@@ -44,6 +44,16 @@ assert_eq!(phone.get_register::<String>("display_name").unwrap().as_deref(), Som
 assert_eq!(phone.counter("visits"), 1);
 ```
 
+> **Direct peer-to-peer only.** `encode_update_since` is safe between the two
+> replicas doing the merge. Do **not** re-encode deltas through a third "relay"
+> doc (A → relay → B): for some actor-id orderings — exactly the orderings
+> hash-derived device ids produce — the relay recomputes the delta from its own
+> re-ordered state and can silently **drop a record**. For relayed topologies,
+> ship each replica's raw local update bytes (`take_local_updates`) through an
+> append-only log and apply them verbatim and idempotently; a relay keeps a
+> queryable copy by replaying the same log. The rustdoc on `encode_update_since`
+> and `tests/relay.rs` carry the full story.
+
 | CRDT type | Field API | Merge rule |
 |---|---|---|
 | LWW-Register | `set_register` / `get_register` / `remove_register` | last writer wins |

@@ -61,6 +61,9 @@ pub use crypto::{
 pub mod collection;
 pub use collection::Collection;
 
+pub mod compress;
+pub use compress::{Compression, DEFAULT_COMPRESSION_LEVEL, DEFAULT_MIN_LEN, FORMAT_RAW, FORMAT_ZSTD};
+
 pub mod meta;
 pub use meta::{
     open_meta, open_meta_with, read_store_version, write_store_version, MetaStatus, Migration,

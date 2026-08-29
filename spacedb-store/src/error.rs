@@ -65,6 +65,13 @@ pub enum StoreError {
     /// migration to bring it to the current format version.
     #[error("schema: {0}")]
     Schema(String),
+
+    /// A prefixed row's format byte or compressed frame failed to decode. The
+    /// bytes were AEAD-authenticated, so this is corruption or a format-version
+    /// mix-up (e.g. a legacy binary's rows read as prefixed) — never attacker
+    /// input. Fails loudly rather than decoding garbage.
+    #[error("row compression: {0}")]
+    Compression(String),
 }
 
 impl StoreError {

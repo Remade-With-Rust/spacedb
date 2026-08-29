@@ -113,8 +113,13 @@ pub fn encode_snapshot(
         )));
     }
 
-    let rs = reed_solomon_erasure::galois_8::ReedSolomon::new(data_shards, parity_shards)
+    // The klauspost-construction matrix keeps this byte-compatible (both
+    // directions) with the `reed-solomon-erasure` crate that produced every
+    // shard written before the rusty_erasure migration — same field
+    // (GF(2^8)/0x11d), same parity bytes, no wire-format break.
+    let matrix = rusty_erasure::compat::reed_solomon_erasure_matrix(data_shards, parity_shards)
         .map_err(|e| DurabilityError::Erasure(e.to_string()))?;
+    let coder = rusty_erasure::coder(matrix).map_err(|e| DurabilityError::Erasure(e.to_string()))?;
 
     let snapshot_len = snapshot.len();
     // Every shard is the same length; the data is split across `k` shards and
@@ -135,8 +140,14 @@ pub fn encode_snapshot(
         shards.push(vec![0u8; shard_len]);
     }
 
-    rs.encode(&mut shards)
-        .map_err(|e| DurabilityError::Erasure(e.to_string()))?;
+    {
+        let (data, parity) = shards.split_at_mut(data_shards);
+        let data_refs: Vec<&[u8]> = data.iter().map(|s| s.as_slice()).collect();
+        let mut parity_refs: Vec<&mut [u8]> = parity.iter_mut().map(|s| s.as_mut_slice()).collect();
+        coder
+            .encode(&data_refs, &mut parity_refs)
+            .map_err(|e| DurabilityError::Erasure(e.to_string()))?;
+    }
 
     let shard_refs: Vec<ShardRef> = shards
         .iter()
@@ -214,10 +225,26 @@ pub fn reconstruct_snapshot(
         return Err(DurabilityError::InsufficientShards { have, need: k });
     }
 
-    let rs = reed_solomon_erasure::galois_8::ReedSolomon::new(k, manifest.parity_shards as usize)
-        .map_err(|e| DurabilityError::Erasure(e.to_string()))?;
-    rs.reconstruct(&mut slots)
-        .map_err(|e| DurabilityError::Erasure(e.to_string()))?;
+    // Only missing DATA shards need rebuilding — the snapshot is assembled
+    // from the first `k` slots; parity is never read again here.
+    let rebuild: Vec<usize> = (0..k).filter(|&i| slots[i].is_none()).collect();
+    if !rebuild.is_empty() {
+        let matrix =
+            rusty_erasure::compat::reed_solomon_erasure_matrix(k, manifest.parity_shards as usize)
+                .map_err(|e| DurabilityError::Erasure(e.to_string()))?;
+        let coder =
+            rusty_erasure::coder(matrix).map_err(|e| DurabilityError::Erasure(e.to_string()))?;
+
+        let stripe: Vec<Option<&[u8]>> = slots.iter().map(|s| s.as_deref()).collect();
+        let mut rebuilt: Vec<Vec<u8>> = vec![vec![0u8; shard_len]; rebuild.len()];
+        let mut out: Vec<&mut [u8]> = rebuilt.iter_mut().map(|s| s.as_mut_slice()).collect();
+        coder
+            .recover(&stripe, &rebuild, &mut out)
+            .map_err(|e| DurabilityError::Erasure(e.to_string()))?;
+        for (&index, bytes) in rebuild.iter().zip(rebuilt) {
+            slots[index] = Some(bytes);
+        }
+    }
 
     let mut snapshot = Vec::with_capacity(k * shard_len);
     for (i, slot) in slots.iter().take(k).enumerate() {

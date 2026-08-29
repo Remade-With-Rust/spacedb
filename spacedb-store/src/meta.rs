@@ -30,9 +30,19 @@ pub const META_TABLE: &str = "_meta";
 /// The key under which the store format version is recorded in [`META_TABLE`].
 pub const STORE_VERSION_KEY: &str = "store_format_version";
 
-/// The store format version this build writes and understands. Bump it (and add a
-/// [`Migration`]) whenever the on-disk layout this crate owns changes.
-pub const STORE_FORMAT_VERSION: u32 = 1;
+/// The store format version this build writes and understands. Bump it (and add
+/// a [`Migration`]) whenever the on-disk layout this crate owns changes.
+///
+/// **v2 (2026-08-28):** collections MAY carry prefixed (optionally
+/// zstd-compressed) sealed values, recorded per collection in
+/// `_collection_formats` — see [`crate::compress`]. v1 stores migrate by stamp
+/// alone ([`PrefixedValuesStamp`]): their existing collections stay legacy-raw
+/// and remain readable; only collections created at v2 are prefixed. The bump
+/// exists so a v1 binary **refuses** a v2 store ([`crate::StoreError::SchemaTooNew`])
+/// instead of postcard-decoding prefixed plaintexts as values — with a
+/// non-self-describing codec that mis-decode can silently "succeed", which is
+/// the failure this gate exists to prevent.
+pub const STORE_FORMAT_VERSION: u32 = 2;
 
 fn meta_table() -> Table<String, u32> {
     Table::new(META_TABLE)
@@ -78,9 +88,26 @@ pub fn write_store_version<E: KvEngine>(engine: &E, version: u32) -> StoreResult
     w.commit()
 }
 
-/// Open the store's `_meta` gate at [`STORE_FORMAT_VERSION`] with no migrations.
+/// The v1 → v2 step: a pure stamp. v2 changes only how collections *created at
+/// v2* seal their values (prefixed, see [`crate::compress`]); every v1
+/// collection has no `_collection_formats` entry and keeps reading and writing
+/// legacy-raw rows. Nothing on disk needs rewriting, so applying this step is a
+/// no-op and trivially idempotent.
+pub struct PrefixedValuesStamp;
+
+impl<E: KvEngine> Migration<E> for PrefixedValuesStamp {
+    fn from_version(&self) -> u32 {
+        1
+    }
+    fn apply(&self, _engine: &E) -> StoreResult<()> {
+        Ok(())
+    }
+}
+
+/// Open the store's `_meta` gate at [`STORE_FORMAT_VERSION`], with the built-in
+/// ladder (currently just the v1 → v2 stamp).
 pub fn open_meta<E: KvEngine>(engine: &E) -> StoreResult<MetaStatus> {
-    open_meta_with(engine, STORE_FORMAT_VERSION, &[])
+    open_meta_with(engine, STORE_FORMAT_VERSION, &[&PrefixedValuesStamp])
 }
 
 /// Open the store's `_meta` gate at `current_version`, running `migrations` to

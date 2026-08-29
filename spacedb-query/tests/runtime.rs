@@ -57,7 +57,7 @@ fn wasm(wat: &str) -> Vec<u8> {
 
 #[test]
 fn runs_a_function_and_attests_it() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let module = wasm(ECHO_WAT);
     let exec = rt.run(&module, b"hello", &RunLimits::default()).unwrap();
 
@@ -71,7 +71,7 @@ fn runs_a_function_and_attests_it() {
 
 #[test]
 fn computes_a_real_transform_on_node() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let module = wasm(SUM_WAT);
     // bytes 1 + 2 + 3 + 250 = 256 -> little-endian 4-byte [0, 1, 0, 0]
     let exec = rt.run(&module, &[1, 2, 3, 250], &RunLimits::default()).unwrap();
@@ -80,7 +80,7 @@ fn computes_a_real_transform_on_node() {
 
 #[test]
 fn identical_runs_corroborate() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let module = wasm(SUM_WAT);
     let a = rt.run(&module, b"lead-capture-payload", &RunLimits::default()).unwrap();
     let b = rt.run(&module, b"lead-capture-payload", &RunLimits::default()).unwrap();
@@ -92,7 +92,7 @@ fn identical_runs_corroborate() {
 
 #[test]
 fn a_divergent_result_is_caught() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let module = wasm(SUM_WAT);
     let honest = rt.run(&module, b"payload", &RunLimits::default()).unwrap();
 
@@ -104,7 +104,7 @@ fn a_divergent_result_is_caught() {
 
 #[test]
 fn fuel_exhaustion_traps_rather_than_hanging() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let module = wasm(SUM_WAT);
     let err = rt
         .run(&module, b"hello", &RunLimits { max_fuel: 1, max_mem_mb: 64 })
@@ -114,7 +114,7 @@ fn fuel_exhaustion_traps_rather_than_hanging() {
 
 #[test]
 fn a_module_missing_the_abi_is_rejected() {
-    let rt = FunctionRuntime::new();
+    let rt = FunctionRuntime::new().unwrap();
     let module = wat::parse_str("(module (memory (export \"memory\") 1))").unwrap();
     let err = rt.run(&module, b"x", &RunLimits::default()).unwrap_err();
     assert!(matches!(err, QueryError::MissingExport("alloc")), "got {err:?}");

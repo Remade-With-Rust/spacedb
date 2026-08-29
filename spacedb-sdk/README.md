@@ -1,8 +1,3 @@
-> **In the wild** — [RAG Converter](https://ragconverter.com) uses `spacedb-sdk` as the storage seam, one CRDT per entry.
-> It makes personal and work files AI-readable without them leaving the machine:
-> the whole conversion runs as WebAssembly in the browser tab, with nothing
-> uploaded and nothing to install.
-
 # spacedb-sdk
 
 [![crates.io](https://img.shields.io/crates/v/spacedb-sdk?logo=rust)](https://crates.io/crates/spacedb-sdk)
@@ -70,7 +65,7 @@ are **additive across the entire dependency graph**. If a *library* depended on
 this allocator — and any application that had already chosen its own would fail
 to build with:
 
-```
+```text
 error: the `#[global_allocator]` in this crate conflicts with global allocator in: spacedb_sdk
 ```
 

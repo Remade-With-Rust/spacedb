@@ -2,6 +2,7 @@
 name = "spacedb-store"
 version = "0.5.2"
 edition = "2021"
+rust-version = "1.95"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Remade-With-Rust/spacedb"
@@ -50,6 +51,11 @@ blake3 = "1"
 
 # Typed errors.
 thiserror = "1"
+
+# Transparent per-row compression inside the AEAD boundary (compress, then
+# encrypt â ciphertext is incompressible). Pure Rust, zero deps, RFC 8878
+# interop-verified against C zstd.
+rusty_zstd = "0.2"
 
 # The durable engine: MIT/Apache-2.0 (no BUSL in the customer product), stable
 # on-disk format, crash-tested, synchronous (no async/sync bridge). See mission L0.
