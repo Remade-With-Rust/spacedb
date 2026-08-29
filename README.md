@@ -1,3 +1,8 @@
+> **In the wild** — [RAG Converter](https://ragconverter.com) uses `SpaceDB` as the storage seam, one CRDT per entry.
+> It makes personal and work files AI-readable without them leaving the machine:
+> the whole conversion runs as WebAssembly in the browser tab, with nothing
+> uploaded and nothing to install.
+
 # SpaceDB
 
 [![crates.io](https://img.shields.io/crates/v/spacedb-sdk?logo=rust&label=spacedb-sdk)](https://crates.io/crates/spacedb-sdk)
