@@ -27,9 +27,15 @@
 //!
 //! ## Actor id
 //!
-//! Each replica has an **actor id** (the yrs client id) — in production derived
-//! from the writer's device/mID key so provenance is intrinsic. Two replicas must
-//! not share an actor id.
+//! Each replica has an **actor id** — in production derived from the writer's
+//! device/mID key so provenance is intrinsic. Two replicas must not share an
+//! actor id.
+//!
+//! It is **not** the yrs client id, and the two must not be bound together. A
+//! yrs client id identifies a document *instance*: the clock is per client and
+//! a freshly constructed `Doc` starts at zero, so a reloaded document that
+//! reuses its actor id as its client id writes over clocks its own imported
+//! blocks already hold. See [`CrdtDoc::new`].
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -79,7 +85,29 @@ impl CrdtDoc {
     /// Create a document for the replica identified by `actor_id` (the yrs client
     /// id). Two replicas must use distinct ids.
     pub fn new(actor_id: u64) -> Self {
-        let doc = Doc::with_client_id(actor_id);
+        // A FRESH yrs client id, deliberately not `actor_id`.
+        //
+        // These are two different things and binding them together loses data.
+        // A yrs client id identifies a document INSTANCE, because the clock is
+        // per client and a newly constructed `Doc` starts its clock at zero.
+        // An actor id identifies a replica across its whole life.
+        //
+        // Reuse the actor id as the client id and every reload is a new
+        // document claiming to be the same client with a rewound clock: the
+        // blocks it imports occupy clocks 0..n for that client, and the first
+        // local write afterwards takes a clock already spoken for. The document
+        // that results cannot be imported again - measured, it fails on the
+        // third load, and `yrs` panics with a divide-by-zero in `find_pivot`
+        // rather than reporting anything.
+        //
+        // Fresh-id-per-instance is the ordinary way to load a persisted yrs
+        // document: prior blocks keep the client id they were written under and
+        // new writes get their own, which is what makes the merge well-defined.
+        //
+        // `actor_id` is still the replica's identity and still what counter
+        // subtotals are keyed by - see `counter_key` - so provenance and the
+        // "two replicas must not share an actor id" invariant are unchanged.
+        let doc = Doc::new();
         // Create the root field map before attaching the observer, so its
         // one-time creation isn't counted as a content change.
         let fields = doc.transact_mut().get_or_insert_map(FIELDS_MAP);
@@ -119,7 +147,7 @@ impl CrdtDoc {
         std::mem::take(&mut *self.pending.lock().unwrap())
     }
 
-    /// This replica's actor id.
+    /// This replica's actor id. Not the yrs client id - see [`CrdtDoc::new`].
     pub fn actor_id(&self) -> u64 {
         self.actor
     }
