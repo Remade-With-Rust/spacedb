@@ -1,4 +1,4 @@
-### In The Wild with over 1,596 Active Installs
+### In The Wild with over 12,338 Active Installs
 > [MATA Network](https://mata.network) uses spaceDB in all durable storage.
 > MATA is a digital freedom toolkit, and owns the Remade With Rust repository.
 
