@@ -14,8 +14,6 @@
 //! come back `Stale`, not silently old. Same scenario + seed ⇒ identical
 //! [`CausalReport`].
 
-use std::rc::Rc;
-
 use spacedb_consistency::{CausalSession, Outcome, Tier};
 use spacedb_crdt::CrdtDoc;
 

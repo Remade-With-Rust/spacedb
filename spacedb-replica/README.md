@@ -97,6 +97,9 @@ Exercised by the simulator driver (`spacedb-sim`).
   `into_frame` frames a message in its own buffer when there is room.
 - `Transport::send_owned` hands a frame to the transport by value
   (`SyncSession` uses it); the default copies, so existing transports compile.
+- `SyncMessage::state_vector_frame(&doc)` frames a document's state vector
+  with one copy (it was cloned out of the document, then copied into the
+  frame); `SyncSession::announce` and the simulator's gossip send it.
 
 ## Testing
 

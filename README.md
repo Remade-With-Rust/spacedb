@@ -244,11 +244,11 @@ Instructions per driver, 0.6.0 -> 0.7.0, release build:
 | `ir_access` (authorize, delegation chains, audit log) | 1,362.5M | 95.6M | **-93.0%** |
 | `ir_query` (WASM map-reduce + host-call function) | 280.9M | 33.4M | **-88.1%** |
 | `ir_vector` (1,500 x 64-d, three metrics, top-10) | 204.2M | 33.1M | **-83.8%** |
-| `ir_crdt` (every CRDT type + sealed persistence) | 199.8M | 151.4M | -24.2% |
-| `ir_sim` (40-replica gossip, causal, quorum, churn) | 2,060.5M | 1,664.9M | -19.2% |
+| `ir_crdt` (every CRDT type + sealed persistence) | 199.8M | 151.1M | -24.4% |
+| `ir_sim` (40-replica gossip, causal, quorum, churn) | 2,060.5M | 1,663.3M | -19.3% |
 | `ir_durability` (erasure encode + reconstruct) | 40.6M | 33.1M | -18.6% |
 | `ir_store` (sealed puts, gets, ranges) | 416.9M | 356.1M | -14.6% |
-| **all eight** | **5,702M** | **2,380M** | **-58.3%** |
+| **all eight** | **5,702M** | **2,378M** | **-58.3%** |
 
 The operator console's driver (`ir_console`, added in this release) went
 91.0M -> 82.9M (-8.8%) before the build change below.

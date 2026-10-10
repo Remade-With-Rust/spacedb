@@ -246,14 +246,28 @@ fn row_aad(table: &str, key: &[u8], schema_version: u32) -> Vec<u8> {
 
 /// Run `f` on the row AAD, assembled on the stack when it fits (any table name
 /// and key under ~240 bytes together - every realistic row) instead of in a
-/// fresh heap buffer on every get and put. Same bytes as [`row_aad`].
+/// fresh heap buffer on every get and put. Same bytes as [`row_aad`]. Short
+/// AADs (most keys) use a 64-byte buffer: the buffer is zeroed first, and a
+/// 256-byte zeroing on every row was measurable (store driver -30,045 Ir).
 fn with_row_aad<R>(table: &str, key: &[u8], schema_version: u32, f: impl FnOnce(&[u8]) -> R) -> R {
-    const STACK: usize = 256;
     let len = 4 + table.len() + 4 + key.len() + 4;
-    if len > STACK {
-        return f(&row_aad(table, key, schema_version));
+    if len <= 64 {
+        aad_on_stack::<64, R>(table, key, schema_version, len, f)
+    } else if len <= 256 {
+        aad_on_stack::<256, R>(table, key, schema_version, len, f)
+    } else {
+        f(&row_aad(table, key, schema_version))
     }
-    let mut buf = [0u8; STACK];
+}
+
+fn aad_on_stack<const N: usize, R>(
+    table: &str,
+    key: &[u8],
+    schema_version: u32,
+    len: usize,
+    f: impl FnOnce(&[u8]) -> R,
+) -> R {
+    let mut buf = [0u8; N];
     let mut at = 0;
     for part in [
         &(table.len() as u32).to_be_bytes()[..],
@@ -416,6 +430,17 @@ mod tests {
 
     const VK_A: [u8; KEY_LEN] = [0xAA; KEY_LEN];
     const VK_B: [u8; KEY_LEN] = [0xBB; KEY_LEN];
+
+    #[test]
+    fn stack_aad_matches_heap_aad_at_every_size() {
+        // "people" + 12 framing bytes: keys of 46 / 47 and 238 / 239 bytes sit
+        // on the 64- and 256-byte buffer edges.
+        for key_len in [0, 1, 45, 46, 47, 100, 237, 238, 239, 400] {
+            let key = vec![0x5A; key_len];
+            let stack = with_row_aad("people", &key, 7, <[u8]>::to_vec);
+            assert_eq!(stack, row_aad("people", &key, 7), "key length {key_len}");
+        }
+    }
 
     // --- DEK envelope ---
 

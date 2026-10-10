@@ -96,6 +96,18 @@ impl<const N: usize> fmt::Write for StackStr<N> {
         self.len = end;
         Ok(())
     }
+
+    // The default goes through `encode_utf8` and `write_str`: a runtime-length
+    // copy of one byte for every separator.
+    fn write_char(&mut self, c: char) -> fmt::Result {
+        if c.is_ascii() {
+            *self.buf.get_mut(self.len).ok_or(fmt::Error)? = c as u8;
+            self.len += 1;
+            Ok(())
+        } else {
+            self.write_str(c.encode_utf8(&mut [0; 4]))
+        }
+    }
 }
 
 /// A derived root/key name (`text<SEP>field`, ...), formatted on the stack when
@@ -483,16 +495,32 @@ impl CrdtDoc {
     /// This document's state vector (the per-actor version frontier), v1-encoded.
     /// A peer sends this to ask "what have I not seen?"
     pub fn state_vector(&self) -> Vec<u8> {
+        self.cached_state_vector(Vec::clone)
+    }
+
+    /// `tag ‖ `[`state_vector`](Self::state_vector) in one allocation, for a
+    /// sender that frames the vector behind a tag byte: it is copied once, not
+    /// twice.
+    pub fn tagged_state_vector(&self, tag: u8) -> Vec<u8> {
+        self.cached_state_vector(|sv| {
+            let mut out = Vec::with_capacity(1 + sv.len());
+            out.push(tag);
+            out.extend_from_slice(sv);
+            out
+        })
+    }
+
+    /// Runs `f` on the current state vector's encoding, re-encoding only if the
+    /// document changed since the last call. The cache stays locked while `f`
+    /// runs, so `f` must not come back to this document.
+    fn cached_state_vector<R>(&self, f: impl FnOnce(&Vec<u8>) -> R) -> R {
         let revision = self.revision();
         let mut cache = self.sv_cache.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((at, sv)) = cache.as_ref() {
-            if *at == revision {
-                return sv.clone();
-            }
-        }
-        let sv = self.doc.transact().state_vector().encode_v1();
-        *cache = Some((revision, sv.clone()));
-        sv
+        let sv = match &mut *cache {
+            Some((at, sv)) if *at == revision => sv,
+            slot => &slot.insert((revision, self.doc.transact().state_vector().encode_v1())).1,
+        };
+        f(sv)
     }
 
     /// Encode the updates this document has that a peer at `their_state_vector`

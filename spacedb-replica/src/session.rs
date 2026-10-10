@@ -76,7 +76,7 @@ impl<T: Transport> SyncSession<T> {
     /// after a partition heals.
     pub fn announce(&self) -> ReplicaResult<()> {
         self.transport
-            .send_owned(SyncMessage::StateVector(self.doc.state_vector()).into_frame())
+            .send_owned(SyncMessage::state_vector_frame(&self.doc))
     }
 
     /// Process every inbound frame, returning how many were acted on (a peer's

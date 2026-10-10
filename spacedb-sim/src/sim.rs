@@ -213,8 +213,7 @@ impl Simulation {
             Event::Gossip { replica } => {
                 if self.replicas[replica].online {
                     if let Some(peer) = self.pick_peer(replica) {
-                        let sv = self.replicas[replica].doc.state_vector();
-                        let frame = SyncMessage::StateVector(sv).into_frame();
+                        let frame = SyncMessage::state_vector_frame(&self.replicas[replica].doc);
                         self.try_send(replica, peer, frame);
                     }
                 }

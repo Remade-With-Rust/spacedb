@@ -12,6 +12,8 @@
 //!
 //! [`Transport`]: crate::Transport
 
+use spacedb_crdt::CrdtDoc;
+
 use crate::error::{ReplicaError, ReplicaResult};
 
 const TAG_STATE_VECTOR: u8 = 0;
@@ -55,6 +57,13 @@ impl SyncMessage {
         frame.push(tag);
         frame.extend_from_slice(&payload);
         frame
+    }
+
+    /// `SyncMessage::StateVector(doc.state_vector()).into_frame()`, built in one
+    /// allocation: the vector is copied into the frame once, not copied out of
+    /// the document and then again into the frame. Same bytes.
+    pub fn state_vector_frame(doc: &CrdtDoc) -> Vec<u8> {
+        doc.tagged_state_vector(TAG_STATE_VECTOR)
     }
 
     /// Parse a `tag ‖ payload` frame.
@@ -112,6 +121,19 @@ mod tests {
         ] {
             assert_eq!(msg.clone().into_frame(), msg.encode());
         }
+    }
+
+    #[test]
+    fn state_vector_frame_matches_encode() {
+        let doc = CrdtDoc::new(1);
+        let empty = SyncMessage::StateVector(doc.state_vector()).encode();
+        assert_eq!(SyncMessage::state_vector_frame(&doc), empty);
+        doc.increment("n", 1);
+        let after = SyncMessage::StateVector(doc.state_vector()).encode();
+        assert_ne!(after, empty);
+        // twice: the second is served from the document's cached vector
+        assert_eq!(SyncMessage::state_vector_frame(&doc), after);
+        assert_eq!(SyncMessage::state_vector_frame(&doc), after);
     }
 
     #[test]
