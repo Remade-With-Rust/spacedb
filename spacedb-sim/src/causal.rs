@@ -53,7 +53,7 @@ impl CausalScenario {
 enum CEvent {
     Write,
     Read,
-    Deliver { to: usize, update: Rc<[u8]> },
+    Deliver { to: usize, update: Vec<u8> },
 }
 
 /// The outcome of a causal stress run.
@@ -137,12 +137,11 @@ impl CausalSim {
                 self.session.record_write(&self.replicas[0]);
                 self.writes += 1;
                 // propagate the home's state to the others with reordering delays
-                // One encoding, shared by every recipient (was cloned per recipient).
-                let update: Rc<[u8]> = self.replicas[0].encode_full().into();
+                let update = self.replicas[0].encode_full();
                 for to in 1..self.replicas.len() {
                     let delay = self.scenario.prop_base + self.rng.below(self.scenario.prop_jitter + 1);
                     self.scheduler
-                        .schedule(delay, CEvent::Deliver { to, update: Rc::clone(&update) });
+                        .schedule(delay, CEvent::Deliver { to, update: update.clone() });
                 }
                 if self.scheduler.now() < self.scenario.horizon {
                     self.scheduler.schedule(self.scenario.write_interval, CEvent::Write);
