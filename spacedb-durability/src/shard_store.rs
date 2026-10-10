@@ -7,6 +7,7 @@
 //! ciphertext fragments it cannot read.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::RwLock;
 
 use crate::error::{DurabilityError, DurabilityResult};
@@ -25,6 +26,19 @@ pub trait ShardStore: Send + Sync {
         Ok(self.get(hash)?.is_some())
     }
 
+    /// [`put`](Self::put) taking ownership, for a caller done with the bytes:
+    /// a store that keeps owned buffers moves them in instead of copying. The
+    /// default copies, as `put` does.
+    fn put_owned(&self, hash: &[u8; 32], bytes: Vec<u8>) -> DurabilityResult<()> {
+        self.put(hash, &bytes)
+    }
+
+    /// The length of the bytes stored under `hash`, or `None` if absent.
+    /// Cheaper than `get` when only the size matters (reclaim accounting).
+    fn len_of(&self, hash: &[u8; 32]) -> DurabilityResult<Option<usize>> {
+        Ok(self.get(hash)?.map(|b| b.len()))
+    }
+
     /// Remove `hash` (used by repair / GC). Absent keys are a no-op.
     fn delete(&self, hash: &[u8; 32]) -> DurabilityResult<()>;
 }
@@ -33,7 +47,7 @@ pub trait ShardStore: Send + Sync {
 /// loses everything on drop.
 #[derive(Default)]
 pub struct MemShardStore {
-    blobs: RwLock<HashMap<[u8; 32], Vec<u8>>>,
+    blobs: RwLock<HashMap<[u8; 32], Vec<u8>, BuildHasherDefault<ContentHashHasher>>>,
 }
 
 impl MemShardStore {
@@ -51,6 +65,28 @@ impl MemShardStore {
     }
 }
 
+/// Hashes a BLAKE3 content address by taking 8 of its bytes. A content hash is
+/// already uniform and cannot be steered toward collisions without a preimage,
+/// so re-hashing it (SipHash, by default) bought nothing.
+#[derive(Default)]
+pub(crate) struct ContentHashHasher(u64);
+
+impl Hasher for ContentHashHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        // `[u8; 32]` hashes as its length (`write_usize`) then its bytes.
+        let mut word = [0u8; 8];
+        let n = bytes.len().min(8);
+        word[..n].copy_from_slice(&bytes[..n]);
+        self.0 ^= u64::from_le_bytes(word);
+    }
+
+    fn write_usize(&mut self, _len: usize) {}
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 fn poisoned() -> DurabilityError {
     DurabilityError::Store("in-memory lock poisoned".into())
 }
@@ -61,12 +97,21 @@ impl ShardStore for MemShardStore {
         Ok(())
     }
 
+    fn put_owned(&self, hash: &[u8; 32], bytes: Vec<u8>) -> DurabilityResult<()> {
+        self.blobs.write().map_err(|_| poisoned())?.insert(*hash, bytes);
+        Ok(())
+    }
+
     fn get(&self, hash: &[u8; 32]) -> DurabilityResult<Option<Vec<u8>>> {
         Ok(self.blobs.read().map_err(|_| poisoned())?.get(hash).cloned())
     }
 
     fn has(&self, hash: &[u8; 32]) -> DurabilityResult<bool> {
         Ok(self.blobs.read().map_err(|_| poisoned())?.contains_key(hash))
+    }
+
+    fn len_of(&self, hash: &[u8; 32]) -> DurabilityResult<Option<usize>> {
+        Ok(self.blobs.read().map_err(|_| poisoned())?.get(hash).map(Vec::len))
     }
 
     fn delete(&self, hash: &[u8; 32]) -> DurabilityResult<()> {

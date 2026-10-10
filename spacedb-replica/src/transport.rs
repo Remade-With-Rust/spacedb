@@ -22,6 +22,13 @@ pub trait Transport {
     /// a partitioned link may silently drop (the protocol heals on reconnect).
     fn send(&self, frame: &[u8]) -> ReplicaResult<()>;
 
+    /// [`send`](Self::send) taking ownership, for a caller that built the
+    /// frame only to send it: a transport that queues owned frames moves it in
+    /// instead of copying. The default copies, as `send` does.
+    fn send_owned(&self, frame: Vec<u8>) -> ReplicaResult<()> {
+        self.send(&frame)
+    }
+
     /// Return all frames that have arrived since the last call.
     fn drain(&self) -> Vec<Vec<u8>>;
 
@@ -69,6 +76,13 @@ impl Transport for InProcessTransport {
             // A dropped receiver (peer gone) behaves like a dead link — ignored,
             // exactly as a best-effort network transport would.
             let _ = self.outbound.send(frame.to_vec());
+        }
+        Ok(())
+    }
+
+    fn send_owned(&self, frame: Vec<u8>) -> ReplicaResult<()> {
+        if self.connected.load(Ordering::Relaxed) {
+            let _ = self.outbound.send(frame);
         }
         Ok(())
     }

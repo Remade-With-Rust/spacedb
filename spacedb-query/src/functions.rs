@@ -41,7 +41,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use wasmtime::{Caller, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
+use wasmtime::{
+    Caller, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc,
+};
 
 use crate::corroborate::FunctionRun;
 use crate::error::{QueryError, QueryResult};
@@ -74,12 +76,22 @@ pub struct FunctionCtx {
     overlay: BTreeMap<(String, String), Option<Vec<u8>>>,
     rights: CtxRights,
     denied: BTreeSet<String>,
+    /// Scratch `(collection, id)` for `get` lookups: the maps are keyed by owned
+    /// strings, so a lookup needs one - reused rather than allocated per call.
+    lookup: (String, String),
 }
 
 impl FunctionCtx {
     pub fn new(snapshot: RecordSnapshot, rights: CtxRights, denied: BTreeSet<String>) -> Self {
         let snapshot_hash = hash_records(&snapshot);
-        Self { snapshot, snapshot_hash, overlay: BTreeMap::new(), rights, denied }
+        Self {
+            snapshot,
+            snapshot_hash,
+            overlay: BTreeMap::new(),
+            rights,
+            denied,
+            lookup: (String::new(), String::new()),
+        }
     }
 
     /// Content hash of the pinned snapshot — bound into the run's `input_digest`
@@ -124,9 +136,11 @@ impl FunctionCtx {
             .sum()
     }
 
-    /// Serve one host call. Pure over `(snapshot, overlay-so-far, op, payload)` —
-    /// the determinism contract's load-bearing property. Errors trap the run.
-    fn dispatch(&mut self, op: &str, payload: &[u8]) -> Result<Vec<u8>, String> {
+    /// Serve one host call into `out` (cleared first). Pure over `(snapshot,
+    /// overlay-so-far, op, payload)` — the determinism contract's load-bearing
+    /// property. Errors trap the run.
+    fn dispatch(&mut self, op: &str, payload: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
+        out.clear();
         match op {
             "get" => {
                 if !self.rights.read {
@@ -134,20 +148,23 @@ impl FunctionCtx {
                 }
                 let (c, id) = split2(payload).ok_or("get: payload must be collection\\0id")?;
                 self.check_open(c)?;
-                let key = (c.to_string(), id.to_string());
-                let value = match self.overlay.get(&key) {
+                let (lc, lid) = &mut self.lookup;
+                lc.clear();
+                lc.push_str(c);
+                lid.clear();
+                lid.push_str(id);
+                let value = match self.overlay.get(&self.lookup) {
                     Some(v) => v.as_deref(),                     // read-your-writes
-                    None => self.snapshot.get(&key).map(Vec::as_slice),
+                    None => self.snapshot.get(&self.lookup).map(Vec::as_slice),
                 };
-                Ok(match value {
+                match value {
                     Some(v) => {
-                        let mut out = Vec::with_capacity(1 + v.len());
                         out.push(1);
                         out.extend_from_slice(v);
-                        out
                     }
-                    None => vec![0],
-                })
+                    None => out.push(0),
+                }
+                Ok(())
             }
             "query" => {
                 if !self.rights.read {
@@ -156,30 +173,37 @@ impl FunctionCtx {
                 let c = std::str::from_utf8(payload).map_err(|_| "query: collection must be UTF-8")?;
                 self.check_open(c)?;
                 // Snapshot merged with this run's overlay, sorted by id (BTreeMap order).
+                // Both maps order by (collection, id), so collection `c` is the
+                // contiguous range starting at (c, "") - read just that.
+                let (lc, lid) = &mut self.lookup;
+                lc.clear();
+                lc.push_str(c);
+                lid.clear();
+                let from = &self.lookup;
                 let mut live: BTreeMap<&str, &[u8]> = self
                     .snapshot
-                    .iter()
-                    .filter(|((col, _), _)| col == c)
+                    .range::<(String, String), _>(from..)
+                    .take_while(|((col, _), _)| col == c)
                     .map(|((_, id), v)| (id.as_str(), v.as_slice()))
                     .collect();
-                for ((col, id), v) in &self.overlay {
-                    if col == c {
-                        match v {
-                            Some(bytes) => {
-                                live.insert(id.as_str(), bytes.as_slice());
-                            }
-                            None => {
-                                live.remove(id.as_str());
-                            }
+                for ((col, id), v) in self.overlay.range::<(String, String), _>(from..) {
+                    if col != c {
+                        break;
+                    }
+                    match v {
+                        Some(bytes) => {
+                            live.insert(id.as_str(), bytes.as_slice());
+                        }
+                        None => {
+                            live.remove(id.as_str());
                         }
                     }
                 }
-                let mut out = Vec::new();
                 for (id, v) in live {
-                    frame_into(&mut out, id.as_bytes());
-                    frame_into(&mut out, v);
+                    frame_into(out, id.as_bytes());
+                    frame_into(out, v);
                 }
-                Ok(out)
+                Ok(())
             }
             "put" => {
                 if !self.rights.write {
@@ -189,7 +213,7 @@ impl FunctionCtx {
                     split3(payload).ok_or("put: payload must be collection\\0id\\0value")?;
                 self.check_open(c)?;
                 self.overlay.insert((c.to_string(), id.to_string()), Some(value.to_vec()));
-                Ok(Vec::new())
+                Ok(())
             }
             "delete" => {
                 if !self.rights.write {
@@ -198,7 +222,7 @@ impl FunctionCtx {
                 let (c, id) = split2(payload).ok_or("delete: payload must be collection\\0id")?;
                 self.check_open(c)?;
                 self.overlay.insert((c.to_string(), id.to_string()), None);
-                Ok(Vec::new())
+                Ok(())
             }
             other => Err(format!("unknown host op `{other}`")),
         }
@@ -225,6 +249,14 @@ pub struct FunctionOutcome {
 struct CtxHostState {
     limits: StoreLimits,
     ctx: FunctionCtx,
+    /// The guest's `memory` and `alloc`, resolved once after instantiation so a
+    /// host call does not look both up by name (and re-check `alloc`'s
+    /// signature) every time. `None` only while the instance is still being
+    /// built; `host_call` falls back to the by-name lookup then.
+    memory: Option<Memory>,
+    alloc: Option<TypedFunc<i32, i32>>,
+    /// The response buffer, reused across this run's host calls.
+    resp: Vec<u8>,
 }
 
 impl FunctionRuntime {
@@ -271,8 +303,7 @@ impl FunctionRuntime {
             *h.finalize().as_bytes()
         };
 
-        let module = Module::new(self.engine(), module_wasm)
-            .map_err(|e| QueryError::Compile(e.to_string()))?;
+        let module = self.module(&workload_hash, module_wasm)?;
 
         let max_bytes = limits.max_mem_mb as usize * 1024 * 1024;
         let mut store = Store::new(
@@ -280,6 +311,9 @@ impl FunctionRuntime {
             CtxHostState {
                 limits: StoreLimitsBuilder::new().memory_size(max_bytes).build(),
                 ctx,
+                memory: None,
+                alloc: None,
+                resp: Vec::new(),
             },
         );
         store.limiter(|h| &mut h.limits);
@@ -296,46 +330,58 @@ impl FunctionRuntime {
                  pay_ptr: i32,
                  pay_len: i32|
                  -> wasmtime::Result<i64> {
-                    let memory = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .ok_or_else(|| wasmtime::Error::msg("host_call: no guest memory"))?;
-
-                    // 1. Copy op + payload out of guest memory.
-                    let read = |caller: &Caller<'_, CtxHostState>, ptr: i32, len: i32| {
-                        let (ptr, len) = (ptr as usize, len as usize);
-                        memory
-                            .data(caller)
-                            .get(ptr..ptr + len)
-                            .map(<[u8]>::to_vec)
-                            .ok_or_else(|| wasmtime::Error::msg("host_call: slice out of bounds"))
+                    let memory = match caller.data().memory {
+                        Some(memory) => memory,
+                        None => caller
+                            .get_export("memory")
+                            .and_then(|e| e.into_memory())
+                            .ok_or_else(|| wasmtime::Error::msg("host_call: no guest memory"))?,
                     };
-                    let op_bytes = read(&caller, op_ptr, op_len)?;
-                    let payload = read(&caller, pay_ptr, pay_len)?;
-                    let op = std::str::from_utf8(&op_bytes)
-                        .map_err(|_| wasmtime::Error::msg("host_call: op must be UTF-8"))?
-                        .to_string();
 
-                    // 2. Dispatch — pure over (snapshot, overlay, op, payload).
-                    let resp = caller
-                        .data_mut()
-                        .ctx
-                        .dispatch(&op, &payload)
-                        .map_err(wasmtime::Error::msg)?;
+                    // 1. Borrow op + payload straight out of guest memory and
+                    // 2. dispatch — pure over (snapshot, overlay, op, payload).
+                    // `data_and_store_mut` hands out the guest's bytes and the
+                    // host state together (disjoint borrows), so neither the op
+                    // nor the payload is copied out first.
+                    let resp = {
+                        let (data, state) = memory.data_and_store_mut(&mut caller);
+                        let data: &[u8] = data;
+                        let slice = |ptr: i32, len: i32| {
+                            let (ptr, len) = (ptr as usize, len as usize);
+                            data.get(ptr..ptr + len).ok_or_else(|| {
+                                wasmtime::Error::msg("host_call: slice out of bounds")
+                            })
+                        };
+                        let op_bytes = slice(op_ptr, op_len)?;
+                        let payload = slice(pay_ptr, pay_len)?;
+                        let op = std::str::from_utf8(op_bytes)
+                            .map_err(|_| wasmtime::Error::msg("host_call: op must be UTF-8"))?;
+                        let mut resp = std::mem::take(&mut state.resp);
+                        state
+                            .ctx
+                            .dispatch(op, payload, &mut resp)
+                            .map_err(wasmtime::Error::msg)?;
+                        resp
+                    };
 
                     // 3. Hand the response back through the guest's own allocator
                     //    (a reentrant call — its fuel burns deterministically).
-                    let alloc: TypedFunc<i32, i32> = caller
-                        .get_export("alloc")
-                        .and_then(|e| e.into_func())
-                        .ok_or_else(|| wasmtime::Error::msg("host_call: no guest alloc"))?
-                        .typed(&caller)
-                        .map_err(|e| wasmtime::Error::msg(format!("host_call: alloc: {e}")))?;
+                    let alloc: TypedFunc<i32, i32> = match caller.data().alloc.clone() {
+                        Some(alloc) => alloc,
+                        None => caller
+                            .get_export("alloc")
+                            .and_then(|e| e.into_func())
+                            .ok_or_else(|| wasmtime::Error::msg("host_call: no guest alloc"))?
+                            .typed(&caller)
+                            .map_err(|e| wasmtime::Error::msg(format!("host_call: alloc: {e}")))?,
+                    };
                     let len = i32::try_from(resp.len())
                         .map_err(|_| wasmtime::Error::msg("host_call: response too large"))?;
                     let ptr = alloc.call(&mut caller, len)?;
                     memory.write(&mut caller, ptr as usize, &resp)?;
-                    Ok((((ptr as u32) as i64) << 32) | (resp.len() as u32) as i64)
+                    let packed = (((ptr as u32) as i64) << 32) | (resp.len() as u32) as i64;
+                    caller.data_mut().resp = resp; // keep the buffer for the next call
+                    Ok(packed)
                 },
             )
             .map_err(|e| QueryError::Instantiate(e.to_string()))?;
@@ -353,6 +399,8 @@ impl FunctionRuntime {
         let run: TypedFunc<(i32, i32), i64> = instance
             .get_typed_func(&mut store, "run")
             .map_err(|_| QueryError::MissingExport("run"))?;
+        store.data_mut().memory = Some(memory);
+        store.data_mut().alloc = Some(alloc.clone());
 
         let in_len =
             i32::try_from(input.len()).map_err(|_| QueryError::Abi("input too large".into()))?;
@@ -365,10 +413,7 @@ impl FunctionRuntime {
             run.call(&mut store, (in_ptr, in_len)).map_err(|e| QueryError::Trap(e.to_string()))?;
         let packed = packed as u64;
         let (out_ptr, out_len) = ((packed >> 32) as usize, (packed & 0xFFFF_FFFF) as usize);
-        let mut output = vec![0u8; out_len];
-        memory
-            .read(&store, out_ptr, &mut output)
-            .map_err(|e| QueryError::Abi(format!("output read at {out_ptr}+{out_len}: {e}")))?;
+        let output = read_output(memory.data(&store), out_ptr, out_len)?;
         let output_digest = hash(&output);
 
         let remaining = store.get_fuel().map_err(|e| QueryError::Fuel(e.to_string()))?;
@@ -392,6 +437,21 @@ impl FunctionRuntime {
 }
 
 // ── framing helpers ────────────────────────────────────────────────────────────
+
+/// Copy the guest's `(out_ptr, out_len)` result slice out of its memory — one
+/// copy, where a zeroed buffer filled by `Memory::read` was a memset and a copy.
+pub(crate) fn read_output(data: &[u8], out_ptr: usize, out_len: usize) -> QueryResult<Vec<u8>> {
+    out_ptr
+        .checked_add(out_len)
+        .and_then(|end| data.get(out_ptr..end))
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| {
+            // `Memory::read`'s error, word for word.
+            QueryError::Abi(format!(
+                "output read at {out_ptr}+{out_len}: out of bounds memory access"
+            ))
+        })
+}
 
 /// `collection \0 id` (both NUL-free UTF-8).
 fn split2(payload: &[u8]) -> Option<(&str, &str)> {

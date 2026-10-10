@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use spacedb_access::{
-    authorize, AccessRequest, Decision, Identity, MemKeyDirectory, Ops, RevocationSet, Scope,
+    AccessRequest, Decision, Identity, MemKeyDirectory, Ops, RevocationSet, Scope,
     SignedCapability,
 };
 use spacedb_consistency::{Outcome, QuorumGroup, StrongResult, Tier};
@@ -111,7 +111,7 @@ impl Database {
         let spec = self.require_field(collection, field, CrdtType::Register)?;
         let tier = self.begin_write(session, collection, spec)?;
         let doc = self.doc_mut(collection);
-        doc.set_register(field, &value.to_string()).map_err(crdt_err)?;
+        doc.set_register(field, &value).map_err(crdt_err)?;
         Ok(local_outcome(tier, session, doc))
     }
 
@@ -182,9 +182,10 @@ impl Database {
         }
         self.authorize_op(session, collection, Ops::WRITE)?;
         self.charge(session)?;
-        let key = format!("{collection}/{field}/{value}");
-        let owner = session.actor.0.as_bytes().to_vec();
-        Ok(self.quorum.claim_unique(&key, &owner))
+        // The quorum copies the owner when it stores it; lend it the bytes.
+        let owner = session.actor.0.as_bytes();
+        let quorum = &mut self.quorum;
+        Ok(with_unique_key(collection, field, value, |key| quorum.claim_unique(key, owner)))
     }
 
     /// Who owns a claimed unique `value`, if anyone (a quorum read).
@@ -194,9 +195,11 @@ impl Database {
         field: &str,
         value: &str,
     ) -> Option<String> {
-        let key = format!("{collection}/{field}/{value}");
-        match self.quorum.read(&key) {
-            Ok((Some(bytes), _)) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+        match with_unique_key(collection, field, value, |key| self.quorum.read(key)) {
+            Ok((Some(bytes), _)) => Some(
+                String::from_utf8(bytes)
+                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+            ),
             _ => None,
         }
     }
@@ -313,20 +316,17 @@ impl Database {
         Ok(spec.tier)
     }
 
-    fn authorize_op(&self, session: &Session, collection: &str, op: Ops) -> SdkResult<()> {
+    fn authorize_op(&self, session: &mut Session, collection: &str, op: Ops) -> SdkResult<()> {
         let scope = Scope::Collection(collection.to_string());
         let request = AccessRequest {
             bearer: &session.actor,
             scope: &scope,
             op,
         };
-        match authorize(
-            &session.capability,
-            &request,
-            &self.directory,
-            self.clock,
-            &self.revocations,
-        ) {
+        match session
+            .capability
+            .authorize(&request, &self.directory, self.clock, &self.revocations)
+        {
             Ok(Decision::Allow) => Ok(()),
             Ok(Decision::Deny(reason)) => Err(SdkError::Denied(reason)),
             Err(e) => Err(SdkError::Auth(e.to_string())),
@@ -356,6 +356,23 @@ fn local_outcome(tier: Tier, session: &mut Session, doc: &CrdtDoc) -> Outcome {
         Tier::Causal => session.causal.record_write(doc),
         _ => Outcome::Local,
     }
+}
+
+/// Run `f` on the quorum key `collection/field/value`, joined on the stack when
+/// it fits - the quorum only reads it (and copies it itself the first time it
+/// stores it) - and on the heap when it does not.
+fn with_unique_key<R>(collection: &str, field: &str, value: &str, f: impl FnOnce(&str) -> R) -> R {
+    let mut buf = [0u8; 128];
+    let len = collection.len() + field.len() + value.len() + 2;
+    if len > buf.len() {
+        return f(&format!("{collection}/{field}/{value}"));
+    }
+    let mut at = 0;
+    for part in [collection, "/", field, "/", value] {
+        buf[at..at + part.len()].copy_from_slice(part.as_bytes());
+        at += part.len();
+    }
+    f(std::str::from_utf8(&buf[..len]).expect("joined from &str parts"))
 }
 
 fn actor_id_for(did: &str) -> u64 {

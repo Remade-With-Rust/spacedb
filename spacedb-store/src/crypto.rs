@@ -27,8 +27,10 @@
 //! read. The key is fetched per operation precisely so that cold-gating is
 //! honoured mid-session rather than bypassed by a cached key.
 
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use std::ops::Range;
+
+use aes_gcm::aead::{Aead, AeadInPlace, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Key, Nonce, Tag};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -166,6 +168,23 @@ pub fn unwrap_dek(
     collection_id: &str,
     wrapped: &WrappedDek,
 ) -> Result<Zeroizing<[u8; KEY_LEN]>, CryptoError> {
+    // The well-formed case decrypts straight into the zeroizing key array: no
+    // heap plaintext, no copy out of it.
+    if wrapped.wrap_ciphertext.len() == KEY_LEN + TAG_LEN {
+        let (body, tag) = wrapped.wrap_ciphertext.split_at(KEY_LEN);
+        let mut dek = Zeroizing::new([0u8; KEY_LEN]);
+        dek.copy_from_slice(body);
+        cipher_for(vault_key)
+            .decrypt_in_place_detached(
+                Nonce::from_slice(&wrapped.wrap_nonce),
+                collection_id.as_bytes(),
+                &mut dek[..],
+                Tag::from_slice(tag),
+            )
+            .map_err(|e| CryptoError::Aead(format!("unwrap: {e}")))?;
+        return Ok(dek);
+    }
+    // Any other length: the original path, so it fails exactly as before.
     let plaintext = Zeroizing::new(
         cipher_for(vault_key)
             .decrypt(
@@ -221,12 +240,40 @@ pub fn rewrap_dek(
 /// locations can produce the same AAD.
 fn row_aad(table: &str, key: &[u8], schema_version: u32) -> Vec<u8> {
     let mut aad = Vec::with_capacity(4 + table.len() + 4 + key.len() + 4);
+    write_row_aad(&mut aad, table, key, schema_version);
+    aad
+}
+
+/// Run `f` on the row AAD, assembled on the stack when it fits (any table name
+/// and key under ~240 bytes together - every realistic row) instead of in a
+/// fresh heap buffer on every get and put. Same bytes as [`row_aad`].
+fn with_row_aad<R>(table: &str, key: &[u8], schema_version: u32, f: impl FnOnce(&[u8]) -> R) -> R {
+    const STACK: usize = 256;
+    let len = 4 + table.len() + 4 + key.len() + 4;
+    if len > STACK {
+        return f(&row_aad(table, key, schema_version));
+    }
+    let mut buf = [0u8; STACK];
+    let mut at = 0;
+    for part in [
+        &(table.len() as u32).to_be_bytes()[..],
+        table.as_bytes(),
+        &(key.len() as u32).to_be_bytes(),
+        key,
+        &schema_version.to_be_bytes(),
+    ] {
+        buf[at..at + part.len()].copy_from_slice(part);
+        at += part.len();
+    }
+    f(&buf[..len])
+}
+
+fn write_row_aad(aad: &mut Vec<u8>, table: &str, key: &[u8], schema_version: u32) {
     aad.extend_from_slice(&(table.len() as u32).to_be_bytes());
     aad.extend_from_slice(table.as_bytes());
     aad.extend_from_slice(&(key.len() as u32).to_be_bytes());
     aad.extend_from_slice(key);
     aad.extend_from_slice(&schema_version.to_be_bytes());
-    aad
 }
 
 /// Seal a row's plaintext under the collection `dek`, binding its location. The
@@ -238,22 +285,33 @@ pub fn seal_row(
     schema_version: u32,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
+    let mut row = Vec::with_capacity(NONCE_LEN + plaintext.len() + TAG_LEN);
+    row.resize(NONCE_LEN, 0);
+    row.extend_from_slice(plaintext);
+    seal_row_in_place(dek, table, key, schema_version, &mut row)?;
+    Ok(row)
+}
+
+/// [`seal_row`] without a second buffer: `row` arrives as `[0; NONCE_LEN] ‖
+/// plaintext` and leaves as `nonce ‖ ciphertext ‖ tag` — the same bytes
+/// [`seal_row`] returns (AES-GCM's combined output is `ciphertext ‖ tag`), so
+/// the caller can lay the plaintext out after the nonce slot and never copy it.
+pub(crate) fn seal_row_in_place(
+    dek: &[u8; KEY_LEN],
+    table: &str,
+    key: &[u8],
+    schema_version: u32,
+    row: &mut Vec<u8>,
+) -> Result<(), CryptoError> {
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
-    let aad = row_aad(table, key, schema_version);
-    let ciphertext = cipher_for(dek)
-        .encrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: plaintext,
-                aad: &aad,
-            },
-        )
-        .map_err(|e| CryptoError::Aead(format!("seal: {e}")))?;
-    let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&ciphertext);
-    Ok(out)
+    row[..NONCE_LEN].copy_from_slice(&nonce);
+    let tag = with_row_aad(table, key, schema_version, |aad| {
+        cipher_for(dek).encrypt_in_place_detached(Nonce::from_slice(&nonce), aad, &mut row[NONCE_LEN..])
+    })
+    .map_err(|e| CryptoError::Aead(format!("seal: {e}")))?;
+    row.extend_from_slice(&tag);
+    Ok(())
 }
 
 /// Open a `nonce ‖ ciphertext` row sealed by [`seal_row`], verifying it was
@@ -266,6 +324,8 @@ pub fn open_row(
     schema_version: u32,
     sealed: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
+    // Not routed through `RowOpener`: for one row, moving a built cipher into a
+    // struct costs more than it saves (measured +443K Ir over 1,400 gets).
     if sealed.len() < NONCE_LEN {
         return Err(CryptoError::ShortRow(sealed.len()));
     }
@@ -280,6 +340,74 @@ pub fn open_row(
             },
         )
         .map_err(|e| CryptoError::Aead(format!("open: {e}")))
+}
+
+/// [`open_row`] on a row the caller owns: decrypts in place and returns where
+/// the plaintext sits inside `sealed` (between the nonce and the tag), so a
+/// get decodes straight out of the buffer the engine handed back instead of
+/// allocating a plaintext copy. Same checks, same errors, same plaintext.
+pub(crate) fn open_row_in_place(
+    dek: &[u8; KEY_LEN],
+    table: &str,
+    key: &[u8],
+    schema_version: u32,
+    sealed: &mut [u8],
+) -> Result<Range<usize>, CryptoError> {
+    with_row_aad(table, key, schema_version, |aad| {
+        open_in_place_with(&cipher_for(dek), aad, sealed)
+    })
+}
+
+fn open_in_place_with(
+    cipher: &Aes256Gcm,
+    aad: &[u8],
+    sealed: &mut [u8],
+) -> Result<Range<usize>, CryptoError> {
+    if sealed.len() < NONCE_LEN {
+        return Err(CryptoError::ShortRow(sealed.len()));
+    }
+    if sealed.len() < NONCE_LEN + TAG_LEN {
+        // What `decrypt` reports for a ciphertext shorter than its tag.
+        return Err(CryptoError::Aead(format!("open: {}", aes_gcm::aead::Error)));
+    }
+    let (nonce, rest) = sealed.split_at_mut(NONCE_LEN);
+    let body_len = rest.len() - TAG_LEN;
+    let (body, tag) = rest.split_at_mut(body_len);
+    cipher
+        .decrypt_in_place_detached(Nonce::from_slice(nonce), aad, body, Tag::from_slice(tag))
+        .map_err(|e| CryptoError::Aead(format!("open: {e}")))?;
+    Ok(NONCE_LEN..NONCE_LEN + body_len)
+}
+
+/// [`open_row`] for many rows under one DEK — a range scan. Building the cipher
+/// is the AES-256 key expansion plus the GHASH key, so a scan does it once
+/// rather than once per row, and reuses one AAD buffer. Each row opens
+/// byte-for-byte as [`open_row`] would open it.
+pub(crate) struct RowOpener {
+    cipher: Aes256Gcm,
+    aad: Vec<u8>,
+}
+
+impl RowOpener {
+    pub(crate) fn new(dek: &[u8; KEY_LEN]) -> Self {
+        Self {
+            cipher: cipher_for(dek),
+            aad: Vec::new(),
+        }
+    }
+
+    /// Open `sealed` in place; see [`open_row_in_place`].
+    pub(crate) fn open_in_place(
+        &mut self,
+        table: &str,
+        key: &[u8],
+        schema_version: u32,
+        sealed: &mut [u8],
+    ) -> Result<Range<usize>, CryptoError> {
+        self.aad.clear();
+        write_row_aad(&mut self.aad, table, key, schema_version);
+        open_in_place_with(&self.cipher, &self.aad, sealed)
+    }
 }
 
 #[cfg(test)]

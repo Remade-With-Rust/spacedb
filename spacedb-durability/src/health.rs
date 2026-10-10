@@ -42,21 +42,18 @@ pub fn surplus_shard_count(
     placement: &Placement,
     fleet: &Fleet,
 ) -> DurabilityResult<usize> {
-    let online = fleet.online_targets();
     let mut surplus = 0;
     for shard_ref in &manifest.shards {
         let placed = match placement.target_for(shard_ref.index) {
             Ok(t) => t,
             Err(_) => continue,
         };
-        for t in &online {
-            if &t.id == placed {
+        for node in fleet.online_nodes() {
+            if &node.id == placed {
                 continue;
             }
-            if let Some(node) = fleet.node(&t.id) {
-                if node.store().has(&shard_ref.hash)? {
-                    surplus += 1;
-                }
+            if node.store().has(&shard_ref.hash)? {
+                surplus += 1;
             }
         }
     }

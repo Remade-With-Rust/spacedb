@@ -172,6 +172,73 @@ pub fn authorize(
     Ok(Decision::Allow)
 }
 
+/// A root capability held for repeated use — a session's credential.
+///
+/// [`authorize`] verifies the issuer's ECDSA signature on every call, and that
+/// verify (a P-256 scalar-multiplication pair plus a SEC1 point decompression)
+/// is nearly its whole cost — yet across calls nothing it depends on changes
+/// except the directory's key for the issuer: the capability and its signature
+/// are fixed. This type **owns** the capability, so it cannot be swapped under
+/// the memo, and remembers the published key its signature last verified
+/// under. Every call still reads the published key, revocation, expiry and the
+/// request exactly as [`authorize`] does, and returns the same decision; the
+/// signature is re-verified whenever the published key is not the remembered
+/// one (rotation, or a key it never verified under).
+#[derive(Clone, Debug)]
+pub struct HeldCapability {
+    signed: SignedCapability,
+    verified_under: Option<Vec<u8>>,
+}
+
+impl HeldCapability {
+    pub fn new(signed: SignedCapability) -> Self {
+        Self {
+            signed,
+            verified_under: None,
+        }
+    }
+
+    /// The held capability.
+    pub fn signed(&self) -> &SignedCapability {
+        &self.signed
+    }
+
+    /// [`authorize`] `request` against the held capability.
+    pub fn authorize(
+        &mut self,
+        request: &AccessRequest,
+        directory: &dyn KeyDirectory,
+        now_unix: u64,
+        revocations: &RevocationSet,
+    ) -> AccessResult<Decision> {
+        let issuer = &self.signed.capability.issuer;
+        // Still the key the signature verified under? Asked in place - no copy
+        // of the key on the per-call path.
+        let unchanged = match &self.verified_under {
+            Some(known) => directory.published_key_is(issuer, known)?,
+            None => false,
+        };
+        if !unchanged {
+            let key = match directory.published_key(issuer)? {
+                Some(k) => k,
+                None => return Ok(Decision::Deny(DenyReason::UnknownIssuer)),
+            };
+            let canonical = self.signed.capability.canonical_bytes()?;
+            if !verify_sec1(&key, &canonical, &self.signed.issuer_signature) {
+                return Ok(Decision::Deny(DenyReason::BadSignature));
+            }
+            self.verified_under = Some(key);
+        }
+        if revocations.is_revoked(&self.signed.capability.id) {
+            return Ok(Decision::Deny(DenyReason::Revoked));
+        }
+        if let Some(reason) = check_request(&self.signed.capability, request, now_unix) {
+            return Ok(Decision::Deny(reason));
+        }
+        Ok(Decision::Allow)
+    }
+}
+
 /// Authorize `request` against a delegation chain: verify every link's signature,
 /// that each link narrows its parent, that no link is revoked, and that the leaf
 /// satisfies the request.

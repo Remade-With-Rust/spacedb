@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use spacedb_store::{
-    Collection, Durability, KeyEncode, KeyProvider, KvEngine, MemEngine, Readable, RedbEngine,
-    StaticKeyProvider, StoreError, WriteTx,
+    Bytes, Collection, Durability, KeyEncode, KeyProvider, KvEngine, MemEngine, Readable,
+    RedbEngine, StaticKeyProvider, StoreError, WriteTx,
 };
 
 fn warm() -> Arc<dyn KeyProvider> {
@@ -130,6 +130,29 @@ fn reserved_name_is_rejected(e: &impl KvEngine) {
     assert!(matches!(res.unwrap_err(), StoreError::ReservedName(_)));
 }
 
+/// `get_with` lends exactly the bytes `get` returns, compressed or not, and
+/// `None` for a missing key without calling the closure.
+fn bytes_get_with_lends_the_value(e: &impl KvEngine) {
+    let col: Collection<String, Bytes> = Collection::open_or_create(e, warm(), "blobs", 1).unwrap();
+    let small = Bytes(vec![1, 2, 3]);
+    let large = Bytes(b"compressible ".repeat(400));
+    {
+        let mut w = e.begin_write(Durability::Immediate).unwrap();
+        col.put(&mut w, &"small".to_string(), &small).unwrap();
+        col.put(&mut w, &"large".to_string(), &large).unwrap();
+        w.commit().unwrap();
+    }
+    let r = e.begin_read().unwrap();
+    for (key, want) in [("small", &small), ("large", &large)] {
+        let key = key.to_string();
+        assert_eq!(col.get(&r, &key).unwrap().as_ref(), Some(want));
+        assert_eq!(col.get_with(&r, &key, |b| b.to_vec()).unwrap(), Some(want.0.clone()));
+    }
+    let mut called = false;
+    assert_eq!(col.get_with(&r, &"absent".to_string(), |_| called = true).unwrap(), None);
+    assert!(!called);
+}
+
 fn encrypted_range_round_trips(e: &impl KvEngine) {
     let c: Collection<u64, u64> = Collection::open_or_create(e, warm(), "nums", 1).unwrap();
     {
@@ -173,6 +196,7 @@ engine_suite!(
         open_missing_collection_errors,
         reserved_name_is_rejected,
         encrypted_range_round_trips,
+        bytes_get_with_lends_the_value,
     ]
 );
 
@@ -192,5 +216,6 @@ engine_suite!(
         open_missing_collection_errors,
         reserved_name_is_rejected,
         encrypted_range_round_trips,
+        bytes_get_with_lends_the_value,
     ]
 );

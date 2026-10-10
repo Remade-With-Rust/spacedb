@@ -1,7 +1,3 @@
-### In The Wild with over 12,338 Active Installs
-> [MATA Network](https://mata.network) uses spaceDB in all durable storage.
-> MATA is a digital freedom toolkit, and owns the Remade With Rust repository.
-
 # SpaceDB
 
 [![crates.io](https://img.shields.io/crates/v/spacedb-sdk?logo=rust&label=spacedb-sdk)](https://crates.io/crates/spacedb-sdk)
@@ -200,7 +196,7 @@ Each crate's README covers its own API, guarantees, and seams.
 
 ---
 
-## Status — Phase 1 complete
+## Status — Phase 1 complete (performance pass in 0.7.0)
 
 All eight milestones built, **fully tested on the native target, zero warnings**:
 
@@ -230,6 +226,78 @@ All eight milestones built, **fully tested on the native target, zero warnings**
   transit), rate-card pricing + agent budgets, a `Settlement` seam (a host plugs
   in `UsageClaim → Maestro → EarningRecord → Iron Bank`); the developer SDK above;
   and the operator console.
+
+## Performance (0.7.0)
+
+0.7.0 is a performance release: the same results, measured on **exact
+instruction counts** (callgrind `Ir`) rather than a clock. Each crate has a
+deterministic driver - `examples/ir_*.rs` - that does fixed work and prints
+values that change if the work changes. A change was kept only if its count
+went down and those values stayed identical; refuted changes were reverted
+with their number recorded.
+
+Instructions per driver, 0.6.0 -> 0.7.0, release build:
+
+| driver | 0.6.0 | 0.7.0 | change |
+|---|---:|---:|---:|
+| `ir_sdk` (authorize + write + read, 330 ops) | 1,136.6M | 12.2M | **-98.9%** |
+| `ir_access` (authorize, delegation chains, audit log) | 1,362.5M | 95.6M | **-93.0%** |
+| `ir_query` (WASM map-reduce + host-call function) | 280.9M | 33.4M | **-88.1%** |
+| `ir_vector` (1,500 x 64-d, three metrics, top-10) | 204.2M | 33.1M | **-83.8%** |
+| `ir_crdt` (every CRDT type + sealed persistence) | 199.8M | 151.4M | -24.2% |
+| `ir_sim` (40-replica gossip, causal, quorum, churn) | 2,060.5M | 1,666.7M | -19.1% |
+| `ir_durability` (erasure encode + reconstruct) | 40.6M | 33.1M | -18.6% |
+| `ir_store` (sealed puts, gets, ranges) | 416.9M | 356.1M | -14.6% |
+| **all eight** | **5,702M** | **2,382M** | **-58.2%** |
+
+The operator console's driver (`ir_console`, added in this release) went
+91.0M -> 82.9M (-8.8%) before the build change below.
+
+Where it came from, largest first:
+
+- **Work done once instead of per call.** Compiled WASM modules are cached by
+  workload hash; an SDK session verifies its capability's signature once and
+  re-checks only if the issuer's published key changes; signatures already
+  verified are remembered process-wide (bounded; only successes; keyed by a
+  BLAKE3 of key, message and signature); erasure coders are built once per
+  geometry; a range scan builds one cipher.
+- **Algorithmic.** Vector insert is O(1) by id (was a linear scan) and search
+  selects the top k instead of sorting everything.
+- **Work no one used.** Remote CRDT updates are no longer re-encoded for an
+  update log that already holds them; documents that never relay raw updates
+  can opt out of the log (`CrdtDoc::new_unlogged`).
+- **Copies.** Rows are sealed and opened in place, byte strings serialize as
+  one copy (`Bytes`), and buffers move instead of being cloned across the
+  engine, shard-store and transport seams. Every copy site in the source is
+  listed with its verdict in the mono's `docs/plans/spacedb-copy-inventory.md`.
+- **Build.** In the MATA monorepo the SpaceDB crates now build at
+  `opt-level = 3` for native release (the web build stays size-tuned).
+  Embedders choose their own profile; the table above includes it.
+
+Behaviour that changed:
+
+- `CrdtStore::contains` is a presence check: it no longer needs the vault
+  unlocked or decrypts the document.
+- Signature verification is cached per process (see above). A log walk does
+  not re-verify a signature the same process just produced in
+  `AuditLog::record`; a tampered entry is still verified in full.
+
+New, all additive: `Bytes`, `Collection::contains_key`,
+`Collection<K, Bytes>::get_with`, `WriteTx::put_raw_owned`,
+`HeldCapability`, `KeyDirectory::published_key_is`, `CrdtDoc::new_unlogged`,
+`CrdtDoc::caught_up_state_vector`, `SyncMessage::decode_ref` / `into_frame`,
+`Transport::send_owned`, `ShardStore::put_owned` / `len_of`. New trait methods
+have default implementations, so existing implementors compile unchanged.
+
+Counts are exact run to run once randomness is pinned: the drivers seed the
+CRDT engine's id generator, and a measurement run answers `getrandom`
+deterministically (an `LD_PRELOAD` shim) so hash seeds, nonces and test keys
+repeat. Reproduce (Linux, valgrind):
+
+```bash
+cargo build --release --example ir_access -p spacedb-access
+valgrind --tool=callgrind target/release/examples/ir_access
+```
 
 ## Building & testing
 

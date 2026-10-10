@@ -21,6 +21,8 @@
 //! mix user-secret and attacker-influenced data in one compressed row; a
 //! collection whose rows do so must opt out with [`Compression::Off`].
 
+use std::borrow::Cow;
+
 use crate::error::{StoreError, StoreResult};
 
 /// Format byte: the payload is the encoded value, verbatim.
@@ -72,6 +74,7 @@ impl Default for Compression {
 /// Wrap an encoded value in the prefixed format, compressing when the policy
 /// says to and it pays. Infallible by design: a compression failure falls back
 /// to raw — a put must never fail because a compressor declined.
+#[cfg(test)]
 pub(crate) fn pack_value(plain: &[u8], policy: Compression) -> Vec<u8> {
     if let Compression::On { level, min_len } = policy {
         if plain.len() >= min_len {
@@ -91,14 +94,36 @@ pub(crate) fn pack_value(plain: &[u8], policy: Compression) -> Vec<u8> {
     out
 }
 
+/// [`pack_value`] in place: `row[at]` is a format byte slot and `row[at + 1..]`
+/// the encoded value; afterwards `row[at..]` holds exactly what `pack_value`
+/// would return for that value. The raw case — every row the floor or the
+/// policy leaves uncompressed — is then free: the value is already in place.
+pub(crate) fn pack_value_in_place(row: &mut Vec<u8>, at: usize, policy: Compression) {
+    row[at] = FORMAT_RAW;
+    if let Compression::On { level, min_len } = policy {
+        let plain_len = row.len() - at - 1;
+        if plain_len >= min_len {
+            if let Ok(z) = rusty_zstd::compress(&row[at + 1..], level) {
+                if z.len() < plain_len {
+                    row.truncate(at);
+                    row.push(FORMAT_ZSTD);
+                    row.extend_from_slice(&z);
+                }
+            }
+        }
+    }
+}
+
 /// Unwrap a prefixed payload back to the encoded value. The input is
 /// AEAD-authenticated (it came out of `open_row`), so a bad format byte or a
 /// broken frame is corruption or a version mix-up, not attacker data — it
 /// fails loudly rather than decoding garbage.
-pub(crate) fn unpack_value(packed: &[u8]) -> StoreResult<Vec<u8>> {
+pub(crate) fn unpack_value(packed: &[u8]) -> StoreResult<Cow<'_, [u8]>> {
     match packed.split_first() {
-        Some((&FORMAT_RAW, rest)) => Ok(rest.to_vec()),
+        // Raw: the value is already sitting there — borrow it, don't copy it.
+        Some((&FORMAT_RAW, rest)) => Ok(Cow::Borrowed(rest)),
         Some((&FORMAT_ZSTD, rest)) => rusty_zstd::decompress(rest)
+            .map(Cow::Owned)
             .map_err(|e| StoreError::Compression(format!("zstd frame: {e:?}"))),
         Some((&byte, _)) => Err(StoreError::Compression(format!(
             "unknown row format byte {byte:#04x}"
@@ -116,7 +141,7 @@ mod tests {
         let plain = b"hello world";
         let packed = pack_value(plain, Compression::Off);
         assert_eq!(packed[0], FORMAT_RAW);
-        assert_eq!(unpack_value(&packed).unwrap(), plain);
+        assert_eq!(&*unpack_value(&packed).unwrap(), &plain[..]);
     }
 
     #[test]
@@ -125,7 +150,7 @@ mod tests {
         let packed = pack_value(&plain, Compression::default());
         assert_eq!(packed[0], FORMAT_ZSTD);
         assert!(packed.len() < plain.len());
-        assert_eq!(unpack_value(&packed).unwrap(), plain);
+        assert_eq!(&*unpack_value(&packed).unwrap(), &plain[..]);
     }
 
     #[test]
@@ -144,7 +169,7 @@ mod tests {
         let packed = pack_value(&plain, Compression::default());
         assert_eq!(packed[0], FORMAT_RAW);
         assert_eq!(packed.len(), plain.len() + 1);
-        assert_eq!(unpack_value(&packed).unwrap(), plain);
+        assert_eq!(&*unpack_value(&packed).unwrap(), &plain[..]);
     }
 
     #[test]

@@ -59,6 +59,19 @@ recall knob nobody measured.
 Depends only on [`spacedb-access`](https://github.com/Remade-With-Rust/spacedb/tree/HEAD/spacedb-access), for the capability gate.
 No MATA crate.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_vector.rs`; outputs unchanged by every change.
+Release build, 0.6.0 -> 0.7.0: **204.2M -> 33.1M instructions (-83.8%)**.
+
+- Insert finds an existing id through a position map (a bulk load was
+  O(n^2)); remove keeps order.
+- Search ranks (score, position) pairs and selects the top k before sorting
+  them; ids are copied only for the k results. Results, scores and tie order
+  are unchanged (a NaN score falls back to the full sort).
+- Cosine norms are computed once per query and once per entry at insert.
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

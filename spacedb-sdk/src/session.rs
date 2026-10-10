@@ -5,14 +5,14 @@
 //! literally spends from its grant), and a [`CausalSession`] that tracks the
 //! frontier it has observed for read-your-writes / monotonic reads.
 
-use spacedb_access::{Did, SignedCapability};
+use spacedb_access::{Did, HeldCapability, SignedCapability};
 use spacedb_consistency::CausalSession;
 use spacedb_meter::Budget;
 
 /// An authenticated, budgeted context for operations.
 pub struct Session {
     pub(crate) actor: Did,
-    pub(crate) capability: SignedCapability,
+    pub(crate) capability: HeldCapability,
     pub(crate) budget: Budget,
     pub(crate) causal: CausalSession,
 }
@@ -25,7 +25,7 @@ impl Session {
         let budget = Budget::new(capability.capability.budget_micro_mata.unwrap_or(0));
         Self {
             actor,
-            capability,
+            capability: HeldCapability::new(capability),
             budget,
             causal: CausalSession::new(),
         }

@@ -37,6 +37,7 @@ pub use chain::{delegate, CapabilityChain};
 mod authorize;
 pub use authorize::{
     authorize, authorize_chain, AccessRequest, Decision, DelegationError, DenyReason,
+    HeldCapability,
 };
 
 mod policy;

@@ -4,6 +4,8 @@
 //! produces the same view as an operator snapshot, so the model is demonstrable
 //! (and tested) with no browser.
 
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 
 use crate::access::{rollup_access, AccessOverview};
@@ -104,10 +106,13 @@ impl Dashboard {
             HealthStatus::Amber => "AMBER",
             HealthStatus::Red => "RED",
         };
+        // Written straight into `out`: `push_str(&format!(..))` built and
+        // dropped a String per line. Writing to a String cannot fail.
         let mut out = String::new();
-        out.push_str(&format!("SpaceDB Operator Console — fleet {badge}\n"));
-        out.push_str(&format!(
-            "Fleet:    {}/{} homes online · {} shards ({} under-replicated, {} at-risk, {} lost, {} over-replicated) · {} GiB\n",
+        let _ = writeln!(out, "SpaceDB Operator Console — fleet {badge}");
+        let _ = writeln!(
+            out,
+            "Fleet:    {}/{} homes online · {} shards ({} under-replicated, {} at-risk, {} lost, {} over-replicated) · {} GiB",
             h.homes_online,
             h.homes_total,
             h.shards_total,
@@ -116,32 +121,35 @@ impl Dashboard {
             h.shards_lost,
             h.shards_over_replicated,
             h.bytes_stored / (1 << 30),
-        ));
-        out.push_str(&format!(
-            "Strong:   {}/{} collections with quorum · worst lag {} ops\n",
+        );
+        let _ = writeln!(
+            out,
+            "Strong:   {}/{} collections with quorum · worst lag {} ops",
             h.strong_collections - h.strong_without_quorum,
             h.strong_collections,
             h.worst_lag_ops,
-        ));
-        out.push_str(&format!(
-            "Access:   {} human + {} agent caps · {} expiring soon · {} revoked · {} recent denials\n",
+        );
+        let _ = writeln!(
+            out,
+            "Access:   {} human + {} agent caps · {} expiring soon · {} revoked · {} recent denials",
             self.access.active_human,
             self.access.active_agent,
             self.access.expiring_soon,
             self.access.revoked,
             self.access.denied_recent,
-        ));
-        out.push_str(&format!(
-            "Economics: {} micro-$MATA revenue (S {} / C {} / T {}) · {} unsettled claims\n",
+        );
+        let _ = writeln!(
+            out,
+            "Economics: {} micro-$MATA revenue (S {} / C {} / T {}) · {} unsettled claims",
             self.economics.revenue_micro_mata,
             self.economics.per_rail.storage,
             self.economics.per_rail.compute,
             self.economics.per_rail.transit,
             self.economics.unsettled_claims,
-        ));
-        out.push_str(&format!("Alerts:   {} ({} critical)\n", self.alerts.len(), self.critical_count()));
+        );
+        let _ = writeln!(out, "Alerts:   {} ({} critical)", self.alerts.len(), self.critical_count());
         for a in &self.alerts {
-            out.push_str(&format!("  [{:?}] {:?} {} — {}\n", a.severity, a.kind, a.subject, a.detail));
+            let _ = writeln!(out, "  [{:?}] {:?} {} — {}", a.severity, a.kind, a.subject, a.detail);
         }
         out
     }

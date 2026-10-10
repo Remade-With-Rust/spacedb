@@ -145,3 +145,33 @@ mod gated {
         ));
     }
 }
+
+/// The top-k selection must return exactly what a full sort would: same ids,
+/// same scores, same order — including ties, which break by id.
+#[test]
+fn top_k_matches_a_full_sort_including_ties() {
+    for metric in [Metric::Cosine, Metric::Dot, Metric::Euclidean] {
+        let mut idx = VectorIndex::new(2, metric);
+        let mut all = Vec::new();
+        for i in 0..60u32 {
+            // Coarse values so many entries tie exactly.
+            let v = vec![(i % 5) as f32, ((i * 7) % 3) as f32 - 1.0];
+            let id = format!("e{:03}", (i * 37) % 60);
+            idx.insert(id.clone(), v.clone()).unwrap();
+            all.push((id, v));
+        }
+        let query = [1.0f32, 0.5];
+        let full = idx.search(&query, all.len()).unwrap();
+        for k in [0, 1, 2, 7, 30, 59, 60, 61] {
+            let top = idx.search(&query, k).unwrap();
+            assert_eq!(top, full[..k.min(full.len())].to_vec(), "{metric:?} k={k}");
+        }
+        // Re-inserting an id replaces it in place; removing keeps the rest.
+        idx.insert("e000", vec![9.0, 9.0]).unwrap();
+        assert_eq!(idx.len(), 60);
+        assert!(idx.remove("e001"));
+        assert!(!idx.remove("e001"));
+        assert_eq!(idx.len(), 59);
+        assert!(idx.search(&query, 59).unwrap().iter().all(|m| m.id != "e001"));
+    }
+}

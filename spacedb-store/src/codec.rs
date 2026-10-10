@@ -41,7 +41,10 @@
 //! Each encoding is also a **bijection** — [`KeyDecode`] reverses it via a cursor
 //! so composite keys can be taken apart in the same order they were built.
 
-use serde::{de::DeserializeOwned, Serialize};
+use std::fmt;
+
+use serde::de::{DeserializeOwned, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::{StoreError, StoreResult};
 
@@ -52,9 +55,92 @@ pub fn encode_value<T: Serialize>(value: &T) -> StoreResult<Vec<u8>> {
     postcard::to_allocvec(value).map_err(StoreError::value_codec)
 }
 
+/// [`encode_value`] appended to `out` — the same bytes, written where the
+/// caller wants them instead of into a fresh buffer.
+pub(crate) fn encode_value_into<T: Serialize>(value: &T, out: Vec<u8>) -> StoreResult<Vec<u8>> {
+    postcard::serialize_with_flavor(value, AppendVec(out)).map_err(StoreError::value_codec)
+}
+
+/// A postcard output that appends to an existing `Vec`. Not `postcard::to_extend`:
+/// its `Extend` flavor appends a byte string one element at a time, which for a
+/// 17 KB document state measured +302K Ir over `to_allocvec`'s single copy.
+struct AppendVec(Vec<u8>);
+
+impl postcard::ser_flavors::Flavor for AppendVec {
+    type Output = Vec<u8>;
+
+    fn try_push(&mut self, byte: u8) -> postcard::Result<()> {
+        self.0.push(byte);
+        Ok(())
+    }
+
+    fn try_extend(&mut self, bytes: &[u8]) -> postcard::Result<()> {
+        self.0.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn finalize(self) -> postcard::Result<Vec<u8>> {
+        Ok(self.0)
+    }
+}
+
+/// [`decode_value`] for a value that borrows from its bytes (`&[u8]`, `&str`).
+pub(crate) fn decode_value_borrowed<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> StoreResult<T> {
+    postcard::from_bytes(bytes).map_err(StoreError::value_codec)
+}
+
 /// Deserialize a value from its `postcard` bytes.
 pub fn decode_value<T: DeserializeOwned>(bytes: &[u8]) -> StoreResult<T> {
     postcard::from_bytes(bytes).map_err(StoreError::value_codec)
+}
+
+/// A byte-string value. `postcard` writes `varint(len) ‖ bytes` for both a
+/// byte string and a `Vec<u8>`, so a [`Bytes`] value and the same bytes stored
+/// as `Vec<u8>` are **the same row** — either type reads what the other wrote.
+/// The difference is the work: serde drives a `Vec<u8>` element by element (a
+/// serializer call per byte, and on decode a visitor push per byte), while a
+/// byte string is one copy each way. Use it as the value type of a collection
+/// of opaque blobs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Bytes(pub Vec<u8>);
+
+impl Serialize for Bytes {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Bytes {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BytesVisitor;
+
+        impl<'de> Visitor<'de> for BytesVisitor {
+            type Value = Bytes;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a byte string")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Bytes, E> {
+                Ok(Bytes(v.to_vec()))
+            }
+
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Bytes, E> {
+                Ok(Bytes(v))
+            }
+
+            // A self-describing format may hand a byte string back as a sequence.
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Bytes, A::Error> {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(4096));
+                while let Some(b) = seq.next_element()? {
+                    out.push(b);
+                }
+                Ok(Bytes(out))
+            }
+        }
+
+        deserializer.deserialize_byte_buf(BytesVisitor)
+    }
 }
 
 // ─── Key codec ───────────────────────────────────────────────────────────────
@@ -89,10 +175,7 @@ pub trait KeyDecode: Sized {
         let mut cur = bytes;
         let value = Self::decode_from(&mut cur)?;
         if !cur.is_empty() {
-            return Err(StoreError::key_decode(format!(
-                "{} trailing byte(s) after key",
-                cur.len()
-            )));
+            return Err(trailing_bytes(cur.len()));
         }
         Ok(value)
     }
@@ -104,51 +187,56 @@ const ESC: u8 = 0x00;
 const ESC_LITERAL: u8 = 0x01; // 0x00 0x01 -> a literal 0x00 content byte
 const ESC_TERM: u8 = 0x00; // 0x00 0x00 -> end of the byte string
 
+// Both directions copy each run between NULs as one slice: only a NUL needs
+// handling, and real keys (UTF-8 strings) almost never contain one, so the
+// common case is a single copy rather than a push per byte.
+
 fn encode_bytes_escaped(bytes: &[u8], out: &mut Vec<u8>) {
-    for &b in bytes {
-        if b == ESC {
-            out.push(ESC);
-            out.push(ESC_LITERAL);
-        } else {
-            out.push(b);
-        }
+    out.reserve(bytes.len() + 2);
+    let mut rest = bytes;
+    while let Some(nul) = rest.iter().position(|&b| b == ESC) {
+        out.extend_from_slice(&rest[..nul]);
+        out.extend_from_slice(&[ESC, ESC_LITERAL]);
+        rest = &rest[nul + 1..];
     }
-    out.push(ESC);
-    out.push(ESC_TERM);
+    out.extend_from_slice(rest);
+    out.extend_from_slice(&[ESC, ESC_TERM]);
 }
 
 fn decode_bytes_escaped(buf: &mut &[u8]) -> StoreResult<Vec<u8>> {
     let data = *buf;
     let mut out = Vec::new();
     let mut i = 0;
-    while i < data.len() {
-        let b = data[i];
-        if b != ESC {
-            out.push(b);
-            i += 1;
-            continue;
-        }
-        // b == ESC: must have a following discriminator byte.
-        let next = *data
-            .get(i + 1)
-            .ok_or_else(|| StoreError::key_decode("truncated escape sequence in key"))?;
-        match next {
-            ESC_TERM => {
-                *buf = &data[i + 2..];
+    loop {
+        let Some(run) = data[i..].iter().position(|&b| b == ESC) else {
+            return Err(StoreError::key_decode("unterminated byte string in key"));
+        };
+        let esc = i + run;
+        out.extend_from_slice(&data[i..esc]);
+        // The ESC must have a following discriminator byte.
+        match data.get(esc + 1) {
+            Some(&ESC_TERM) => {
+                *buf = &data[esc + 2..];
                 return Ok(out);
             }
-            ESC_LITERAL => {
+            Some(&ESC_LITERAL) => {
                 out.push(0x00);
-                i += 2;
+                i = esc + 2;
             }
-            other => {
-                return Err(StoreError::key_decode(format!(
-                    "invalid escape 0x00 0x{other:02x} in key"
-                )))
-            }
+            Some(&other) => return Err(invalid_escape(other)),
+            None => return Err(StoreError::key_decode("truncated escape sequence in key")),
         }
     }
-    Err(StoreError::key_decode("unterminated byte string in key"))
+}
+
+#[cold]
+fn trailing_bytes(n: usize) -> StoreError {
+    StoreError::key_decode(format!("{n} trailing byte(s) after key"))
+}
+
+#[cold]
+fn invalid_escape(byte: u8) -> StoreError {
+    StoreError::key_decode(format!("invalid escape 0x00 0x{byte:02x} in key"))
 }
 
 // --- u64 ---
@@ -261,6 +349,23 @@ mod tests {
     use proptest::prelude::*;
 
     // --- value codec ---
+
+    #[test]
+    fn bytes_encode_exactly_like_vec_u8() {
+        for len in [0usize, 1, 127, 128, 300, 20_000] {
+            let raw: Vec<u8> = (0..len).map(|i| (i * 31 % 256) as u8).collect();
+            let as_vec = encode_value(&raw).unwrap();
+            let as_bytes = encode_value(&Bytes(raw.clone())).unwrap();
+            assert_eq!(as_vec, as_bytes, "len {len}");
+            // Either type reads what the other wrote.
+            assert_eq!(decode_value::<Bytes>(&as_vec).unwrap(), Bytes(raw.clone()));
+            assert_eq!(decode_value::<Vec<u8>>(&as_bytes).unwrap(), raw);
+            // And appending after a prefix writes the same bytes.
+            let appended = encode_value_into(&Bytes(raw.clone()), vec![9, 9]).unwrap();
+            assert_eq!(&appended[..2], &[9, 9]);
+            assert_eq!(&appended[2..], &as_vec[..]);
+        }
+    }
 
     #[test]
     fn value_codec_round_trips_and_is_deterministic() {

@@ -96,6 +96,24 @@ final state.
 
 Depends on `yrs` and `spacedb-store` — never on a MATA crate.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_crdt.rs`; outputs unchanged by every change.
+Release build, 0.6.0 -> 0.7.0: **199.8M -> 151.4M instructions (-24.2%)**.
+
+- Remote updates are no longer encoded for the local-update log on apply -
+  they are already in the log they came from. Local writes still log exactly
+  the bytes they did.
+- `CrdtDoc::new_unlogged` for replicas that never relay raw updates (sync by
+  state vector or full state): their writes skip the log entirely.
+- Stored strings are read borrowed (counters, registers, sets); counter keys,
+  values and type names are formatted on the stack.
+- `state_vector` is reused while the document is unchanged; a causal read
+  takes one state-vector walk (`caught_up_state_vector`).
+- `CrdtStore` merges a loaded state straight out of the decrypted row, and
+  `contains` is a presence check (no vault unlock, no decryption).
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

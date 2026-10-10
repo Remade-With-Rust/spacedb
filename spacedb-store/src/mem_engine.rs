@@ -94,26 +94,51 @@ impl Readable for MemWriteTx<'_> {
     }
 
     fn range_raw(&self, table: &str, lo: &[u8], hi: &[u8]) -> StoreResult<Vec<(Vec<u8>, Vec<u8>)>> {
-        // Materialize the base slice, then apply this txn's overlay edits within
-        // the range so a range scan also sees uncommitted writes.
-        let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = self
+        // The base slice with this txn's overlay edits applied, so a range scan
+        // also sees uncommitted writes. Both sides are sorted by key, so one
+        // merge pass yields the result in order and copies each surviving row
+        // once (it used to be copied into a temporary map and out again).
+        let bounds = (Bound::Included(lo), Bound::Excluded(hi));
+        let mut base = self
             .base
             .get(table)
-            .map(|t| range_table(t, lo, hi).into_iter().collect())
-            .unwrap_or_default();
-        if let Some(t) = self.overlay.get(table) {
-            for (k, slot) in t.range::<[u8], _>((Bound::Included(lo), Bound::Excluded(hi))) {
-                match slot {
-                    Some(v) => {
-                        merged.insert(k.clone(), v.clone());
-                    }
-                    None => {
-                        merged.remove(k);
+            .into_iter()
+            .flat_map(|t| t.range::<[u8], _>(bounds))
+            .peekable();
+        let mut edits = self
+            .overlay
+            .get(table)
+            .into_iter()
+            .flat_map(|t| t.range::<[u8], _>(bounds))
+            .peekable();
+        let mut out = Vec::new();
+        loop {
+            let take_edit = match (base.peek(), edits.peek()) {
+                (None, None) => break,
+                (Some(_), None) => false,
+                (None, Some(_)) => true,
+                (Some((bk, _)), Some((ek, _))) => {
+                    if ek <= bk {
+                        if ek == bk {
+                            base.next(); // the edit shadows the base row
+                        }
+                        true
+                    } else {
+                        false
                     }
                 }
+            };
+            if take_edit {
+                let (k, slot) = edits.next().expect("peeked");
+                if let Some(v) = slot {
+                    out.push((k.clone(), v.clone()));
+                }
+            } else {
+                let (k, v) = base.next().expect("peeked");
+                out.push((k.clone(), v.clone()));
             }
         }
-        Ok(merged.into_iter().collect())
+        Ok(out)
     }
 }
 
@@ -123,6 +148,18 @@ impl WriteTx for MemWriteTx<'_> {
             .entry(table.to_string())
             .or_default()
             .insert(key.to_vec(), Some(val.to_vec()));
+        Ok(())
+    }
+
+    fn put_raw_owned(&mut self, table: &str, key: Vec<u8>, mut val: Vec<u8>) -> StoreResult<()> {
+        // Moved, not copied. Trimmed to its length, so a row grown in place
+        // keeps no more memory than the copy `put_raw` would have made
+        // (shrinking is an in-place realloc, not a copy).
+        val.shrink_to_fit();
+        self.overlay
+            .entry(table.to_string())
+            .or_default()
+            .insert(key, Some(val));
         Ok(())
     }
 

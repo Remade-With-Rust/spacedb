@@ -16,6 +16,13 @@ pub trait KeyDirectory {
     /// The published key bytes for `did`, or `None` if the DID is unknown
     /// (an unknown issuer is a [`Deny`](crate::Decision), not an error).
     fn published_key(&self, did: &Did) -> AccessResult<Option<Vec<u8>>>;
+
+    /// Whether `did`'s published key is exactly `key`. The default compares a
+    /// copy from [`published_key`](Self::published_key); a directory holding
+    /// the keys can compare in place.
+    fn published_key_is(&self, did: &Did, key: &[u8]) -> AccessResult<bool> {
+        Ok(self.published_key(did)?.as_deref() == Some(key))
+    }
 }
 
 /// In-memory DID → key directory, for tests and single-machine use.
@@ -52,5 +59,14 @@ impl KeyDirectory for MemKeyDirectory {
             .map_err(|_| AccessError::Directory("lock poisoned".into()))?
             .get(did)
             .cloned())
+    }
+
+    fn published_key_is(&self, did: &Did, key: &[u8]) -> AccessResult<bool> {
+        Ok(self
+            .keys
+            .read()
+            .map_err(|_| AccessError::Directory("lock poisoned".into()))?
+            .get(did)
+            .is_some_and(|k| k.as_slice() == key))
     }
 }

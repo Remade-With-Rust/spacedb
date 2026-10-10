@@ -89,6 +89,15 @@ pub trait Settlement {
 Depends on `serde` / `postcard` / `thiserror` only — no `spacedb-*` and no
 `mata-*` crates.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_console.rs`; outputs unchanged by every change.
+Exercised by the console driver (`spacedb-console`).
+
+- `LocalSettlement` copies a customer id into its tally only for a new
+  customer.
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

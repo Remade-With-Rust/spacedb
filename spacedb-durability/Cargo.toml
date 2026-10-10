@@ -1,6 +1,6 @@
 [package]
 name = "spacedb-durability"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.95"
 readme = "README.md"
@@ -24,7 +24,7 @@ crate-type = ["rlib"]
 # runtime-dispatched SIMD kernels. Uses the klauspost construction, byte-compatible
 # with `reed-solomon-erasure` in both directions, so shards written before the
 # migration remain recoverable and vice versa. MIT/Apache.
-rusty_erasure = "0.4"
+rusty_erasure = "0.4.2"
 
 # Content addressing for snapshots and shards (MATA's content-address hash).
 blake3 = "1"

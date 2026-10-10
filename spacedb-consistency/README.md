@@ -88,6 +88,17 @@ splitting.
 
 Depends only on [`spacedb-crdt`](https://github.com/Remade-With-Rust/spacedb/tree/HEAD/spacedb-crdt). No MATA crate.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_sim.rs`; outputs unchanged by every change.
+Exercised by the simulator driver (`spacedb-sim`).
+
+- Quorum reads borrow the winning value (`claim_unique` only needs to know
+  one exists); `cas` updates members in place and moves the value into the
+  last one; neither allocates a list of online members.
+- A causal read compares and takes its new token in one state-vector walk.
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

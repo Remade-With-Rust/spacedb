@@ -148,6 +148,29 @@ fn read_your_writes_in_range(e: &impl KvEngine) {
     w.commit().unwrap();
 }
 
+/// A range inside a write transaction merges committed rows with the
+/// transaction's own puts, overwrites and deletes, interleaved, in key order.
+fn range_merges_staged_edits_in_order(e: &impl KvEngine) {
+    let t: Table<u64, u64> = Table::new("merge");
+    {
+        let mut w = e.begin_write(Durability::Immediate).unwrap();
+        for k in [10, 20, 30, 40, 60] {
+            t.put(&mut w, &k, &k).unwrap();
+        }
+        w.commit().unwrap();
+    }
+    let mut w = e.begin_write(Durability::Immediate).unwrap();
+    t.put(&mut w, &5, &500).unwrap(); // before every committed row
+    t.put(&mut w, &20, &2000).unwrap(); // overwrites a committed row
+    assert!(t.delete(&mut w, &30).unwrap()); // removes one
+    t.put(&mut w, &35, &3500).unwrap(); // between two
+    t.put(&mut w, &45, &4500).unwrap(); // exactly the (excluded) upper bound
+    assert!(!t.delete(&mut w, &99).unwrap()); // a tombstone with no row under it
+    let got = t.range(&w, &5, &45).unwrap();
+    assert_eq!(got, vec![(5, 500), (10, 10), (20, 2000), (35, 3500), (40, 40)]);
+    w.commit().unwrap();
+}
+
 fn eventual_durability_round_trips(e: &impl KvEngine) {
     let t: Table<u64, String> = Table::new("eventual");
     let mut w = e.begin_write(Durability::Eventual).unwrap();
@@ -189,6 +212,7 @@ engine_suite!(
         multi_table_atomic_commit,
         rollback_on_drop,
         read_your_writes_in_range,
+        range_merges_staged_edits_in_order,
         eventual_durability_round_trips,
     ]
 );
@@ -209,6 +233,7 @@ engine_suite!(
         multi_table_atomic_commit,
         rollback_on_drop,
         read_your_writes_in_range,
+        range_merges_staged_edits_in_order,
         eventual_durability_round_trips,
     ]
 );

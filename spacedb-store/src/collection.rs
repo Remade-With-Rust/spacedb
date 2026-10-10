@@ -17,15 +17,19 @@
 //! hashing the key before it reaches the store (the ADR 0005 `blake3(rp_origin)`
 //! pattern) — a caller concern, not this layer's.
 
+use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use serde::{de::DeserializeOwned, Serialize};
 use zeroize::Zeroizing;
 
-use crate::codec::{decode_value, encode_value, KeyDecode, KeyEncode};
-use crate::compress::{pack_value, unpack_value, Compression};
-use crate::crypto::{open_row, seal_row, unwrap_dek, wrap_fresh_dek, KeyProvider, WrappedDek, KEY_LEN};
+use crate::codec::{decode_value, decode_value_borrowed, encode_value_into, Bytes, KeyDecode, KeyEncode};
+use crate::compress::{pack_value_in_place, unpack_value, Compression};
+use crate::crypto::{
+    open_row_in_place, seal_row_in_place, unwrap_dek, wrap_fresh_dek, KeyProvider, RowOpener,
+    WrappedDek, KEY_LEN, NONCE_LEN,
+};
 use crate::engine::{Durability, KvEngine, Readable, WriteTx};
 use crate::error::{StoreError, StoreResult};
 use crate::table::Table;
@@ -91,6 +95,10 @@ pub struct Collection<K, V> {
     compression: Compression,
     _types: PhantomData<fn() -> (K, V)>,
 }
+
+/// Initial capacity of a sealed row's buffer (nonce, format byte, a typical
+/// encoded value and the tag). Larger rows still grow; `put_raw_owned` trims.
+const ROW_CAPACITY_HINT: usize = 256;
 
 impl<K, V> std::fmt::Debug for Collection<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -239,15 +247,26 @@ where
         Ok(unwrap_dek(&vault_key, &self.name, &self.wrapped_dek)?)
     }
 
-    /// Encode a value into the plaintext this collection seals — verbatim for
-    /// legacy collections, `format_byte ‖ payload` (compressing per policy) for
-    /// prefixed ones.
-    fn plaintext_for_store(&self, value: &V) -> StoreResult<Vec<u8>> {
-        let plain = encode_value(value)?;
-        Ok(match self.format {
-            ValueFormat::Legacy => plain,
-            ValueFormat::Prefixed => pack_value(&plain, self.compression),
-        })
+    /// The sealed row for `value`: `nonce ‖ AEAD(plaintext)`, where the
+    /// plaintext is the encoded value verbatim for legacy collections and
+    /// `format_byte ‖ payload` (compressing per policy) for prefixed ones. It is
+    /// built in one buffer — encoded straight after the nonce slot, packed and
+    /// sealed in place — so the value is never copied between stages.
+    fn seal_value(&self, dek: &[u8; KEY_LEN], key_bytes: &[u8], value: &V) -> StoreResult<Vec<u8>> {
+        // Room for a typical row up front, so encoding does not grow the buffer
+        // 12 -> 24 -> 48 -> ... through a chain of reallocations.
+        let mut row = Vec::with_capacity(ROW_CAPACITY_HINT);
+        row.resize(NONCE_LEN, 0);
+        match self.format {
+            ValueFormat::Legacy => row = encode_value_into(value, row)?,
+            ValueFormat::Prefixed => {
+                row.push(0); // the format byte's slot
+                row = encode_value_into(value, row)?;
+                pack_value_in_place(&mut row, NONCE_LEN, self.compression);
+            }
+        }
+        seal_row_in_place(dek, &self.name, key_bytes, self.schema_version, &mut row)?;
+        Ok(row)
     }
 
     /// Decode a sealed-and-opened plaintext back into a value.
@@ -263,27 +282,28 @@ where
     /// an unlock to decrypt.
     pub fn get(&self, tx: &impl Readable, key: &K) -> StoreResult<Option<V>> {
         let key_bytes = key.encode();
-        let sealed = match tx.get_raw(&self.name, &key_bytes)? {
+        let mut sealed = match tx.get_raw(&self.name, &key_bytes)? {
             Some(bytes) => bytes,
             None => return Ok(None),
         };
         let dek = self.dek()?;
-        let plain = open_row(&dek, &self.name, &key_bytes, self.schema_version, &sealed)?;
-        Ok(Some(self.value_from_plaintext(&plain)?))
+        let plain =
+            open_row_in_place(&dek, &self.name, &key_bytes, self.schema_version, &mut sealed)?;
+        Ok(Some(self.value_from_plaintext(&sealed[plain])?))
     }
 
     /// Encrypt and store `value` under `key`.
     pub fn put(&self, tx: &mut impl WriteTx, key: &K, value: &V) -> StoreResult<()> {
         let key_bytes = key.encode();
         let dek = self.dek()?;
-        let sealed = seal_row(
-            &dek,
-            &self.name,
-            &key_bytes,
-            self.schema_version,
-            &self.plaintext_for_store(value)?,
-        )?;
-        tx.put_raw(&self.name, &key_bytes, &sealed)
+        let sealed = self.seal_value(&dek, &key_bytes, value)?;
+        tx.put_raw_owned(&self.name, key_bytes, sealed)
+    }
+
+    /// Whether `key` holds a row. Reads only the engine - no vault key and no
+    /// decryption - since a row's presence is visible to the engine anyway.
+    pub fn contains_key(&self, tx: &impl Readable, key: &K) -> StoreResult<bool> {
+        Ok(tx.get_raw(&self.name, &key.encode())?.is_some())
     }
 
     /// Remove `key`. Returns `true` if a value was present. No key material is
@@ -300,11 +320,41 @@ where
             return Ok(Vec::new());
         }
         let dek = self.dek()?;
+        let mut opener = RowOpener::new(&dek);
         raw.into_iter()
-            .map(|(key_bytes, sealed)| {
-                let plain = open_row(&dek, &self.name, &key_bytes, self.schema_version, &sealed)?;
-                Ok((K::decode(&key_bytes)?, self.value_from_plaintext(&plain)?))
+            .map(|(key_bytes, mut sealed)| {
+                let plain =
+                    opener.open_in_place(&self.name, &key_bytes, self.schema_version, &mut sealed)?;
+                Ok((K::decode(&key_bytes)?, self.value_from_plaintext(&sealed[plain])?))
             })
             .collect()
+    }
+}
+
+impl<K: KeyEncode + KeyDecode> Collection<K, Bytes> {
+    /// [`get`](Collection::get), lending the value to `f` straight out of the
+    /// decrypted row instead of copying it into an owned [`Bytes`] first - for a
+    /// caller that only reads it (a document state it merges, a blob it hashes).
+    pub fn get_with<R>(
+        &self,
+        tx: &impl Readable,
+        key: &K,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> StoreResult<Option<R>> {
+        let key_bytes = key.encode();
+        let mut sealed = match tx.get_raw(&self.name, &key_bytes)? {
+            Some(bytes) => bytes,
+            None => return Ok(None),
+        };
+        let dek = self.dek()?;
+        let plain =
+            open_row_in_place(&dek, &self.name, &key_bytes, self.schema_version, &mut sealed)?;
+        let plain = &sealed[plain];
+        let encoded = match self.format {
+            ValueFormat::Legacy => Cow::Borrowed(plain),
+            ValueFormat::Prefixed => unpack_value(plain)?,
+        };
+        let bytes: &[u8] = decode_value_borrowed(&encoded)?;
+        Ok(Some(f(bytes)))
     }
 }

@@ -8,6 +8,9 @@
 //!
 //! [`KeyDirectory`]: crate::KeyDirectory
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
 use p256::ecdsa::signature::{Signer, Verifier};
 use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -85,13 +88,73 @@ impl Identity {
 /// Returns `false` (not an error) on any parse or verification failure — a bad
 /// signature is a [`Deny`](crate::Decision), not a system error.
 pub(crate) fn verify_sec1(public_sec1: &[u8], message: &[u8], sig_der: &[u8]) -> bool {
-    let key = match VerifyingKey::from_sec1_bytes(public_sec1) {
-        Ok(k) => k,
-        Err(_) => return false,
+    let id = verification_id(public_sec1, blake3::hash(message).as_bytes(), sig_der);
+    if already_verified(&id) {
+        return true;
+    }
+    let ok = match parse_sec1(public_sec1) {
+        Some(key) => verify_with_key(&key, message, sig_der),
+        None => false,
     };
-    let signature = match Signature::from_der(sig_der) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    key.verify(message, &signature).is_ok()
+    if ok {
+        remember_verified(id);
+    }
+    ok
+}
+
+// ─── verified-signature cache ────────────────────────────────────────────────
+//
+// Authorization re-verifies the same capability signatures on every request,
+// and an audit log re-verifies every entry on every walk. A P-256 verify is a
+// pair of scalar multiplications (~5M instructions); the cache check is one
+// BLAKE3 of a few hundred bytes. The identity binds all three inputs, so only a
+// BLAKE3 collision could make a different (key, message, signature) look
+// verified. Only successes are kept: a bad signature is re-checked, and costs
+// the same, every time. Bounded, and cleared when full.
+
+const VERIFIED_CAP: usize = 4096;
+
+fn verified() -> &'static Mutex<HashSet<[u8; 32]>> {
+    static VERIFIED: OnceLock<Mutex<HashSet<[u8; 32]>>> = OnceLock::new();
+    VERIFIED.get_or_init(Default::default)
+}
+
+/// The cache identity of one verification: the key, the message's BLAKE3 and
+/// the signature, each length-prefixed so no two triples share an encoding.
+pub(crate) fn verification_id(public_sec1: &[u8], message_digest: &[u8; 32], sig_der: &[u8]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(&(public_sec1.len() as u64).to_le_bytes());
+    h.update(public_sec1);
+    h.update(message_digest);
+    h.update(&(sig_der.len() as u64).to_le_bytes());
+    h.update(sig_der);
+    *h.finalize().as_bytes()
+}
+
+pub(crate) fn already_verified(id: &[u8; 32]) -> bool {
+    verified().lock().map(|s| s.contains(id)).unwrap_or(false)
+}
+
+pub(crate) fn remember_verified(id: [u8; 32]) {
+    if let Ok(mut s) = verified().lock() {
+        if s.len() >= VERIFIED_CAP {
+            s.clear();
+        }
+        s.insert(id);
+    }
+}
+
+/// Parse a SEC1 public key, `None` if it is not a valid P-256 point. A
+/// compressed key costs a point decompression (a field square root), so a caller
+/// verifying many signatures under one key parses it once.
+pub(crate) fn parse_sec1(public_sec1: &[u8]) -> Option<VerifyingKey> {
+    VerifyingKey::from_sec1_bytes(public_sec1).ok()
+}
+
+/// [`verify_sec1`] against an already-parsed key.
+pub(crate) fn verify_with_key(key: &VerifyingKey, message: &[u8], sig_der: &[u8]) -> bool {
+    match Signature::from_der(sig_der) {
+        Ok(signature) => key.verify(message, &signature).is_ok(),
+        Err(_) => false,
+    }
 }

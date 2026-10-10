@@ -61,3 +61,46 @@ fn reactive_counter_query() {
     assert_eq!(q.poll(&d), Some(7));
     assert_eq!(q.poll(&d), None);
 }
+
+/// An unlogged document keeps no local-update log but is otherwise the same
+/// document: its revision moves and its watchers fire on every change.
+#[test]
+fn an_unlogged_document_still_reports_changes() {
+    let d = CrdtDoc::new_unlogged(1);
+    let w = d.watch();
+    let before = d.revision();
+    d.increment("n", 1);
+    d.set_register("x", &1u64).unwrap();
+    assert!(d.revision() > before);
+    assert!(w.drain_changed());
+    assert!(d.take_local_updates().is_empty(), "nothing is logged");
+    assert_eq!(d.counter("n"), 1);
+
+    // Its full state still seeds a logged replica exactly.
+    let peer = CrdtDoc::new(2);
+    peer.apply_update(&d.encode_full()).unwrap();
+    assert_eq!(peer.counter("n"), 1);
+}
+
+/// `state_vector` is reused only while the document is unchanged: a local
+/// write or a merged remote update yields a new vector, equal to what a fresh
+/// computation gives.
+#[test]
+fn the_state_vector_follows_every_change() {
+    let a = CrdtDoc::new(1);
+    let b = CrdtDoc::new(2);
+    let sv0 = a.state_vector();
+    assert_eq!(a.state_vector(), sv0, "unchanged document, same vector");
+    a.increment("n", 1);
+    let sv1 = a.state_vector();
+    assert_ne!(sv1, sv0, "a local write moves the vector");
+    b.increment("n", 5);
+    a.apply_update(&b.encode_full()).unwrap();
+    let sv2 = a.state_vector();
+    assert_ne!(sv2, sv1, "a merged remote update moves the vector");
+    // What a fresh document with the same history reports.
+    let c = CrdtDoc::new(3);
+    c.apply_update(&a.encode_full()).unwrap();
+    assert_eq!(c.ops_behind(&sv2).unwrap(), 0);
+    assert_eq!(a.ops_behind(&c.state_vector()).unwrap(), 0);
+}

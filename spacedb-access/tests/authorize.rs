@@ -1,8 +1,8 @@
 //! M5-S1: minting and enforcing signed capabilities — the consent core.
 
 use spacedb_access::{
-    authorize, AccessRequest, Capability, Decision, DenyReason, Did, Identity, MemKeyDirectory,
-    Ops, RevocationSet, Scope, SignedCapability,
+    authorize, AccessRequest, Capability, Decision, DenyReason, Did, HeldCapability, Identity,
+    MemKeyDirectory, Ops, RevocationSet, Scope, SignedCapability,
 };
 
 const FAR_FUTURE: u64 = 9_000_000_000;
@@ -218,4 +218,72 @@ fn signed_capability_round_trips_through_serde() {
     let bytes = signed.encode().unwrap();
     let decoded = SignedCapability::decode(&bytes).unwrap();
     assert_eq!(decoded, signed);
+}
+
+/// A held capability decides exactly as `authorize` does, call after call —
+/// and re-verifies the signature when the issuer's published key changes.
+#[test]
+fn held_capability_decides_like_authorize_and_follows_key_rotation() {
+    let (owner, agent, dir) = owner_and_agent();
+    let scope = Scope::Collection("notes".into());
+    let cap = Capability::grant(owner.did().clone(), agent.clone(), scope.clone(), Ops::READ)
+        .unwrap()
+        .with_expiry(FAR_FUTURE);
+    let signed = SignedCapability::sign(cap, &owner).unwrap();
+    let mut held = HeldCapability::new(signed.clone());
+    let other = Scope::Collection("secrets".into());
+    let mut revs = no_revs();
+    for (scope, now) in [(&scope, NOW), (&other, NOW), (&scope, FAR_FUTURE), (&scope, NOW)] {
+        let req = read_request(&agent, scope);
+        assert_eq!(
+            held.authorize(&req, &dir, now, &revs).unwrap(),
+            authorize(&signed, &req, &dir, now, &revs).unwrap()
+        );
+    }
+    // Revocation is still checked on every call.
+    revs.revoke(signed.capability.id);
+    let req = read_request(&agent, &scope);
+    assert_eq!(
+        held.authorize(&req, &dir, NOW, &revs).unwrap(),
+        Decision::Deny(DenyReason::Revoked)
+    );
+
+    // Rotate the owner's published key: the remembered verification no longer
+    // applies, so the old signature now fails, exactly as `authorize` says.
+    let rotated = Identity::generate(owner.did().clone()).unwrap();
+    dir.publish(&rotated).unwrap();
+    let revs = no_revs();
+    assert_eq!(
+        held.authorize(&req, &dir, NOW, &revs).unwrap(),
+        Decision::Deny(DenyReason::BadSignature)
+    );
+    assert_eq!(
+        authorize(&signed, &req, &dir, NOW, &revs).unwrap(),
+        Decision::Deny(DenyReason::BadSignature)
+    );
+}
+
+/// The verified-signature cache never covers anything but the exact (key,
+/// message, signature) it verified: after a genuine capability is accepted, a
+/// tampered copy carrying the same signature is still refused, and the genuine
+/// one is still accepted.
+#[test]
+fn a_cached_verification_does_not_cover_a_tampered_copy() {
+    let (owner, agent, dir) = owner_and_agent();
+    let scope = Scope::Collection("notes".into());
+    let cap = Capability::grant(owner.did().clone(), agent.clone(), scope.clone(), Ops::READ).unwrap();
+    let signed = SignedCapability::sign(cap, &owner).unwrap();
+    let req = read_request(&agent, &scope);
+    for _ in 0..2 {
+        assert_eq!(authorize(&signed, &req, &dir, NOW, &no_revs()).unwrap(), Decision::Allow);
+    }
+    let mut tampered = signed.clone();
+    tampered.capability.ops = Ops::READ | Ops::WRITE;
+    for _ in 0..2 {
+        assert_eq!(
+            authorize(&tampered, &req, &dir, NOW, &no_revs()).unwrap(),
+            Decision::Deny(DenyReason::BadSignature)
+        );
+    }
+    assert_eq!(authorize(&signed, &req, &dir, NOW, &no_revs()).unwrap(), Decision::Allow);
 }

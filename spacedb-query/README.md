@@ -112,6 +112,19 @@ to complete.
 Built on `wasmtime` directly — the same engine MATA's `maestro-fn-runtime`
 wraps — with no MATA dependency.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_query.rs`; outputs unchanged by every change.
+Release build, 0.6.0 -> 0.7.0: **280.9M -> 33.4M instructions (-88.1%)**.
+
+- Compiled modules are cached by workload hash (a map-reduce used to compile
+  its two modules once per shard and per reduce step).
+- Host calls borrow op and payload from guest memory, resolve `memory` and
+  `alloc` once per instance, and reuse one lookup key and one response buffer
+  per run; the `query` op reads its collection as a key range.
+- The reduce fold moves partials and frames them in one reused buffer.
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

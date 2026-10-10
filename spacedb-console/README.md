@@ -76,6 +76,15 @@ drive the dashboard from a simulated fleet.
 Depends on [`spacedb-meter`](https://github.com/Remade-With-Rust/spacedb/tree/HEAD/spacedb-meter) (for `Resource`) and `serde`.
 No MATA crate.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_console.rs`; outputs unchanged by every change.
+Driver added in 0.7.0: **91.0M -> 82.9M instructions (-8.8%)** for this release's changes, before the release build change.
+
+- `render_text` writes straight into its output instead of building and
+  dropping a `String` per line.
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

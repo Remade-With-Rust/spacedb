@@ -75,6 +75,23 @@ reveals nothing at all.
 
 Depends on `reed-solomon-erasure`, `blake3`, `serde`/`postcard` — no MATA crate.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_durability.rs`; outputs unchanged by every change.
+Release build, 0.6.0 -> 0.7.0: **40.6M -> 33.1M instructions (-18.6%)**.
+
+- Coders are built once per (data, parity) geometry instead of per call.
+- Reconstruction borrows the available shards and rebuilds missing data
+  shards in place in the snapshot; encoding zeroes only a shard's padding.
+- `repair` reuses the hashes the re-encode computed and moves regenerated
+  shards into the store (`ShardStore::put_owned`); `reclaim` reads a shard's
+  length without copying it (`ShardStore::len_of`). Both new trait methods have
+  defaults.
+- Health, surplus and reclaim walk the online nodes directly.
+- `MemShardStore` hashes its BLAKE3 keys by their own bytes (no SipHash).
+- rusty_erasure 0.4.2.
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

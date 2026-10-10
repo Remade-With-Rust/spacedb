@@ -11,7 +11,7 @@
 //! the protocol heals dropped messages and partitions on its own.
 
 use spacedb_crdt::CrdtDoc;
-use spacedb_replica::SyncMessage;
+use spacedb_replica::{SyncFrame, SyncMessage};
 
 use crate::network::{NetworkModel, Partition};
 use crate::rng::Rng;
@@ -132,7 +132,8 @@ impl Simulation {
         let mut rng = Rng::seed(scenario.seed);
         let replicas = (0..scenario.replicas)
             .map(|i| Replica {
-                doc: CrdtDoc::new(i as u64 + 1),
+                // Anti-entropy by state vector only: nothing drains a local-update log.
+                doc: CrdtDoc::new_unlogged(i as u64 + 1),
                 online: true,
             })
             .collect();
@@ -213,7 +214,7 @@ impl Simulation {
                 if self.replicas[replica].online {
                     if let Some(peer) = self.pick_peer(replica) {
                         let sv = self.replicas[replica].doc.state_vector();
-                        let frame = SyncMessage::StateVector(sv).encode();
+                        let frame = SyncMessage::StateVector(sv).into_frame();
                         self.try_send(replica, peer, frame);
                     }
                 }
@@ -228,19 +229,19 @@ impl Simulation {
                     return;
                 }
                 self.delivered += 1;
-                match SyncMessage::decode(&frame) {
-                    Ok(SyncMessage::StateVector(sv)) => {
+                match SyncMessage::decode_ref(&frame) {
+                    Ok(SyncFrame::StateVector(sv)) => {
                         // Reply with exactly the delta `from` is missing.
-                        if let Ok(delta) = self.replicas[to].doc.encode_update_since(&sv) {
+                        if let Ok(delta) = self.replicas[to].doc.encode_update_since(sv) {
                             if !delta.is_empty() {
                                 self.sync_rounds += 1;
-                                let reply = SyncMessage::Update(delta).encode();
+                                let reply = SyncMessage::Update(delta).into_frame();
                                 self.try_send(to, from, reply);
                             }
                         }
                     }
-                    Ok(SyncMessage::Update(update)) => {
-                        let _ = self.replicas[to].doc.apply_update(&update);
+                    Ok(SyncFrame::Update(update)) => {
+                        let _ = self.replicas[to].doc.apply_update(update);
                     }
                     Err(_) => {}
                 }

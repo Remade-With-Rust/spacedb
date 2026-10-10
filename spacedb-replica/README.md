@@ -87,6 +87,17 @@ partition recovery — is provable inside one process with no sockets.
 
 Depends only on [`spacedb-crdt`](https://github.com/Remade-With-Rust/spacedb/tree/HEAD/spacedb-crdt). No MATA crate is referenced.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_sim.rs`; outputs unchanged by every change.
+Exercised by the simulator driver (`spacedb-sim`).
+
+- `SyncMessage::decode_ref` parses a frame without copying its payload, and
+  `into_frame` frames a message in its own buffer when there is room.
+- `Transport::send_owned` hands a frame to the transport by value
+  (`SyncSession` uses it); the default copies, so existing transports compile.
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

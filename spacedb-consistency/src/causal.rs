@@ -44,16 +44,22 @@ impl CausalSession {
     /// If `doc` is behind, the read is honestly [`Outcome::Stale`] and the token
     /// is *not* advanced.
     pub fn read(&mut self, doc: &CrdtDoc) -> Outcome {
-        let lag = if self.token.is_empty() {
-            0
+        // One state-vector walk: the comparison and the new token come from the
+        // same transaction. An undecodable token counts as caught up, as before.
+        let caught_up = if self.token.is_empty() {
+            Ok(doc.state_vector())
         } else {
-            doc.ops_behind(&self.token).unwrap_or(0)
+            match doc.caught_up_state_vector(&self.token) {
+                Ok(answer) => answer,
+                Err(_) => Ok(doc.state_vector()),
+            }
         };
-        if lag == 0 {
-            self.token = doc.state_vector();
-            Outcome::Committed(Tier::Causal)
-        } else {
-            Outcome::Stale { lag_ops: lag }
+        match caught_up {
+            Ok(token) => {
+                self.token = token;
+                Outcome::Committed(Tier::Causal)
+            }
+            Err(lag) => Outcome::Stale { lag_ops: lag },
         }
     }
 }

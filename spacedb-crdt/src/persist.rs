@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use spacedb_store::{Collection, Durability, KeyProvider, KvEngine, WriteTx};
+use spacedb_store::{Bytes, Collection, Durability, KeyProvider, KvEngine, WriteTx};
 
 use crate::{CrdtDoc, CrdtResult};
 
@@ -32,7 +32,10 @@ const SCHEMA_VERSION: u32 = 1;
 /// agnostic like the underlying [`Collection`]: the methods take the engine and
 /// open their own transactions.
 pub struct CrdtStore {
-    docs: Collection<String, Vec<u8>>,
+    /// `Bytes`, not `Vec<u8>`: the stored rows are identical (postcard encodes
+    /// both as `varint(len) ‖ bytes`), but a full document state round-trips as
+    /// one copy instead of one serde call per byte.
+    docs: Collection<String, Bytes>,
 }
 
 impl CrdtStore {
@@ -46,7 +49,7 @@ impl CrdtStore {
     /// Persist `doc`'s full CRDT state under `doc_id`, encrypted, in a single
     /// write transaction.
     pub fn save<E: KvEngine>(&self, engine: &E, doc_id: &str, doc: &CrdtDoc) -> CrdtResult<()> {
-        let state = doc.encode_full();
+        let state = Bytes(doc.encode_full());
         let mut w = engine.begin_write(Durability::Immediate)?;
         self.docs.put(&mut w, &doc_id.to_string(), &state)?;
         w.commit()?;
@@ -62,13 +65,11 @@ impl CrdtStore {
         doc_id: &str,
         actor_id: u64,
     ) -> CrdtResult<CrdtDoc> {
-        let stored = {
-            let r = engine.begin_read()?;
-            self.docs.get(&r, &doc_id.to_string())?
-        };
         let doc = CrdtDoc::new(actor_id);
-        if let Some(state) = stored {
-            doc.apply_update(&state)?;
+        let r = engine.begin_read()?;
+        // The state is merged straight out of the decrypted row - no copy of it.
+        if let Some(applied) = self.docs.get_with(&r, &doc_id.to_string(), |state| doc.apply_update(state))? {
+            applied?;
         }
         Ok(doc)
     }
@@ -88,9 +89,10 @@ impl CrdtStore {
         Ok(doc)
     }
 
-    /// Whether a document has been persisted under `doc_id`.
+    /// Whether a document has been persisted under `doc_id`. A presence check:
+    /// it neither needs the vault unlocked nor decrypts and decodes the state.
     pub fn contains<E: KvEngine>(&self, engine: &E, doc_id: &str) -> CrdtResult<bool> {
         let r = engine.begin_read()?;
-        Ok(self.docs.get(&r, &doc_id.to_string())?.is_some())
+        Ok(self.docs.contains_key(&r, &doc_id.to_string())?)
     }
 }

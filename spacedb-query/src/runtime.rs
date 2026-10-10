@@ -22,6 +22,9 @@
 //! No host imports are required — which is exactly what keeps a function
 //! deterministic and safe to run on a volunteer device.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
 
 use crate::corroborate::FunctionRun;
@@ -60,10 +63,22 @@ struct HostState {
     limits: StoreLimits,
 }
 
+/// How many compiled modules a runtime keeps. A query touches two (map and
+/// reduce) and a node serves a handful of deployed functions; past this the
+/// cache is simply cleared, so it can never grow without bound.
+const MODULE_CACHE_CAP: usize = 64;
+
 /// A reusable compute-to-data engine. Construct once per host; [`run`](Self::run)
-/// is stateless.
+/// is stateless apart from a compile cache keyed by the workload hash.
 pub struct FunctionRuntime {
     engine: Engine,
+    /// Compiled modules by BLAKE3 of their bytes — the workload identity every
+    /// run already computes. A map-reduce runs the same two modules once per
+    /// shard and once per reduce step; compiling them each time was the whole
+    /// cost of the query (cranelift dwarfs the guest's work). `Module` is a
+    /// cheap `Arc` handle, and compilation is a pure function of the bytes and
+    /// the engine config, so a cached module is indistinguishable from a fresh one.
+    modules: Mutex<HashMap<[u8; 32], Module>>,
 }
 
 impl FunctionRuntime {
@@ -84,7 +99,29 @@ impl FunctionRuntime {
         // this slim feature set — and a determinism-bound runtime has no use for it.
         config.wasm_backtrace(false);
         let engine = Engine::new(&config).map_err(|e| QueryError::Engine(e.to_string()))?;
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            modules: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// The compiled module for `module_wasm`, whose hash is `workload_hash`.
+    pub(crate) fn module(
+        &self,
+        workload_hash: &[u8; 32],
+        module_wasm: &[u8],
+    ) -> QueryResult<Module> {
+        let mut modules = self.modules.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(module) = modules.get(workload_hash) {
+            return Ok(module.clone());
+        }
+        let module = Module::new(&self.engine, module_wasm)
+            .map_err(|e| QueryError::Compile(e.to_string()))?;
+        if modules.len() >= MODULE_CACHE_CAP {
+            modules.clear();
+        }
+        modules.insert(*workload_hash, module.clone());
+        Ok(module)
     }
 
     /// Run `module_wasm`'s `run` entry over `input` under `limits`, returning the
@@ -99,8 +136,7 @@ impl FunctionRuntime {
         let workload_hash = hash(module_wasm);
         let input_digest = hash(input);
 
-        let module = Module::new(&self.engine, module_wasm)
-            .map_err(|e| QueryError::Compile(e.to_string()))?;
+        let module = self.module(&workload_hash, module_wasm)?;
 
         let max_bytes = limits.max_mem_mb as usize * 1024 * 1024;
         let mut store = Store::new(
@@ -144,10 +180,7 @@ impl FunctionRuntime {
         let packed = packed as u64;
         let out_ptr = (packed >> 32) as usize;
         let out_len = (packed & 0xFFFF_FFFF) as usize;
-        let mut output = vec![0u8; out_len];
-        memory
-            .read(&store, out_ptr, &mut output)
-            .map_err(|e| QueryError::Abi(format!("output read at {out_ptr}+{out_len}: {e}")))?;
+        let output = crate::functions::read_output(memory.data(&store), out_ptr, out_len)?;
         let output_digest = hash(&output);
 
         // fuel consumed = budget − remaining; peak ≈ final size (functions don't

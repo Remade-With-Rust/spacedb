@@ -166,6 +166,18 @@ if watcher.drain_changed() { /* re-render */ }
 `quorum_partition` / `quorum_heal` let a test take strong-tier members offline
 and prove the group fails safe instead of splitting.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_sdk.rs`; outputs unchanged by every change.
+Release build, 0.6.0 -> 0.7.0: **1,136.6M -> 12.2M instructions (-98.9%)**.
+
+- A session verifies its capability's signature once and re-verifies only if
+  the issuer's published key changes; revocation, expiry and scope are still
+  checked on every op, with the same decisions.
+- Register writes serialize the borrowed value; uniqueness keys are joined on
+  the stack and the owner's bytes are lent to the quorum.
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

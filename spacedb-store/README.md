@@ -79,6 +79,26 @@ Depends on **no** MATA crate. MATA-specific capability (vault key, identity,
 mesh replication, settlement) enters only through seams this crate defines. The
 dependency arrow is MATA → SpaceDB, never the reverse.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_store.rs`; outputs unchanged by every change.
+Release build, 0.6.0 -> 0.7.0: **416.9M -> 356.1M instructions (-14.6%)**.
+
+- A put seals its row in one buffer: the value is encoded straight after the
+  nonce slot, packed and encrypted in place, and moved into the engine
+  (`WriteTx::put_raw_owned`) rather than copied.
+- A get decrypts in place and decodes straight out of the engine's buffer;
+  uncompressed rows are borrowed, not copied.
+- The per-row AAD is built on the stack; a range scan builds one cipher; the
+  DEK is unwrapped into its zeroizing array without a heap plaintext.
+- Keys are escaped and unescaped a run at a time, not a byte at a time.
+- `Bytes`: a byte-string value type that stores exactly the same rows as
+  `Vec<u8>` but serializes as one copy instead of one call per byte. A
+  `Collection<K, Bytes>` can lend a value without copying it (`get_with`).
+- New: `Collection::contains_key` checks presence from the engine alone.
+- rusty_zstd 0.3.0 (byte-identical output at the default level 3).
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

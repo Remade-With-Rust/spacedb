@@ -1,6 +1,6 @@
 [package]
 name = "spacedb-crdt"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.95"
 readme = "README.md"
@@ -44,6 +44,8 @@ thiserror = "1"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
+# Pins yrs client ids in the `ir_*` instruction-count drivers (examples only).
+fastrand = "2"
 # Fuzz the convergence property: random ops in random orders must converge.
 proptest = "1"
 

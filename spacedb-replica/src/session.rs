@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use spacedb_crdt::CrdtDoc;
 
 use crate::error::ReplicaResult;
-use crate::message::SyncMessage;
+use crate::message::{SyncFrame, SyncMessage};
 use crate::transport::Transport;
 
 /// The honest freshness of a replica's reads relative to its peer. The app can
@@ -75,8 +75,8 @@ impl<T: Transport> SyncSession<T> {
     /// has that we lack. Call after a local change, on connect, or to recover
     /// after a partition heals.
     pub fn announce(&self) -> ReplicaResult<()> {
-        let frame = SyncMessage::StateVector(self.doc.state_vector()).encode();
-        self.transport.send(&frame)
+        self.transport
+            .send_owned(SyncMessage::StateVector(self.doc.state_vector()).into_frame())
     }
 
     /// Process every inbound frame, returning how many were acted on (a peer's
@@ -85,16 +85,16 @@ impl<T: Transport> SyncSession<T> {
     pub fn pump(&self) -> ReplicaResult<usize> {
         let mut actions = 0;
         for frame in self.transport.drain() {
-            match SyncMessage::decode(&frame)? {
-                SyncMessage::StateVector(their_sv) => {
+            match SyncMessage::decode_ref(&frame)? {
+                SyncFrame::StateVector(their_sv) => {
                     // Record the peer's frontier so we can report honest lag.
-                    *self.last_peer_sv.borrow_mut() = Some(their_sv.clone());
-                    let delta = self.doc.encode_update_since(&their_sv)?;
-                    self.transport.send(&SyncMessage::Update(delta).encode())?;
+                    *self.last_peer_sv.borrow_mut() = Some(their_sv.to_vec());
+                    let delta = self.doc.encode_update_since(their_sv)?;
+                    self.transport.send_owned(SyncMessage::Update(delta).into_frame())?;
                     actions += 1;
                 }
-                SyncMessage::Update(update) => {
-                    self.doc.apply_update(&update)?;
+                SyncFrame::Update(update) => {
+                    self.doc.apply_update(update)?;
                     actions += 1;
                 }
             }

@@ -210,8 +210,13 @@ impl ChurnSim {
                 self.scheduler.schedule(delay, DEvent::Fail { home });
             }
             DEvent::Repair => {
-                self.sample_margin();
-                if let Ok(report) = repair(&self.manifest, &self.placement, &self.fleet) {
+                // `health` counts a shard reachable by exactly `repair`'s test
+                // (placed target online and holding it), so when every shard is
+                // reachable `repair` would return an empty report - skip it.
+                let all_reachable = self.sample_margin();
+                if all_reachable {
+                    // nothing to repair
+                } else if let Ok(report) = repair(&self.manifest, &self.placement, &self.fleet) {
                     if !report.repaired_shards.is_empty() {
                         self.repairs_run += 1;
                         self.shards_repaired += report.repaired_shards.len() as u64;
@@ -223,10 +228,15 @@ impl ChurnSim {
                 }
             }
             DEvent::Reclaim => {
-                if let Ok(surplus) = surplus_shard_count(&self.manifest, &self.placement, &self.fleet) {
+                // `reclaim` only drops copies `surplus_shard_count` counts, so a
+                // zero surplus means an empty reclaim - skip the second scan.
+                let surplus = surplus_shard_count(&self.manifest, &self.placement, &self.fleet);
+                if let Ok(surplus) = surplus {
                     self.max_surplus = self.max_surplus.max(surplus);
                 }
-                if let Ok(report) = reclaim(&self.manifest, &self.placement, &self.fleet) {
+                if matches!(surplus, Ok(0)) {
+                    // nothing to reclaim
+                } else if let Ok(report) = reclaim(&self.manifest, &self.placement, &self.fleet) {
                     if !report.is_empty() {
                         self.reclaims_run += 1;
                         self.copies_reclaimed += report.reclaimed.len() as u64;
@@ -239,13 +249,16 @@ impl ChurnSim {
         }
     }
 
-    fn sample_margin(&mut self) {
+    /// Record the reachability margin; returns whether every shard is reachable.
+    fn sample_margin(&mut self) -> bool {
         if let Ok(h) = health(&self.manifest, &self.placement, &self.fleet) {
             self.min_reachable = self.min_reachable.min(h.reachable);
             if h.reachable < h.shards_needed {
                 self.ever_below_k = true;
             }
+            return h.reachable == h.total_shards;
         }
+        false
     }
 
     fn jitter(&mut self, base: u64) -> u64 {

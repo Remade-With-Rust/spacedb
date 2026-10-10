@@ -37,6 +37,8 @@
 //! reuses its actor id as its client id writes over clocks its own imported
 //! blocks already hold. See [`CrdtDoc::new`].
 
+use std::borrow::Cow;
+use std::fmt::{self, Write as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -44,8 +46,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Array, Doc, GetString, Map, MapRef, ReadTxn, StateVector, Subscription, Text, Transact, Update,
-    WriteTxn,
+    Any, Array, Doc, GetString, Map, MapRef, Out, ReadTxn, StateVector, Subscription, Text,
+    Transact, Update, WriteTxn,
 };
 
 use crate::error::{CrdtError, CrdtResult};
@@ -58,6 +60,68 @@ const FIELDS_MAP: &str = "_fields";
 /// `0x01` is not expected in field names, so `register("x")` (key `"x"`) and
 /// `counter("x")` (keys `"\u{1}c\u{1}x\u{1}<actor>"`) never collide.
 const SEP: char = '\u{1}';
+
+/// Run `f` on a stored value's text. Everything this document writes is a string
+/// (`Any::String`), whose text is borrowed rather than copied; anything else
+/// falls back to `Out::to_string`, exactly what the callers did before.
+fn with_text<R, T: ReadTxn>(out: Out, txn: &T, f: impl FnOnce(&str) -> R) -> R {
+    match out {
+        Out::Any(Any::String(s)) => f(&s),
+        other => f(&other.to_string(txn)),
+    }
+}
+
+/// A short string formatted into a fixed stack buffer - writing past `N` bytes
+/// fails rather than allocating, so the caller can fall back to a `String`.
+struct StackStr<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> StackStr<N> {
+    fn new() -> Self {
+        Self { buf: [0; N], len: 0 }
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.buf[..self.len]).expect("written only from &str")
+    }
+}
+
+impl<const N: usize> fmt::Write for StackStr<N> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let end = self.len + s.len();
+        let dst = self.buf.get_mut(self.len..end).ok_or(fmt::Error)?;
+        dst.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+/// A derived root/key name (`text<SEP>field`, ...), formatted on the stack when
+/// it fits - it is only ever looked up by `&str` - and on the heap when not.
+enum Name {
+    Stack(StackStr<96>),
+    Heap(String),
+}
+
+impl Name {
+    fn new(args: fmt::Arguments<'_>) -> Self {
+        let mut s = StackStr::new();
+        if s.write_fmt(args).is_ok() {
+            Name::Stack(s)
+        } else {
+            Name::Heap(fmt::format(args))
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Name::Stack(s) => s.as_str(),
+            Name::Heap(s) => s,
+        }
+    }
+}
 
 /// A convergent document: a yrs CRDT plus a typed field API.
 pub struct CrdtDoc {
@@ -79,12 +143,31 @@ pub struct CrdtDoc {
     applying_remote: Arc<AtomicBool>,
     /// Keeps the revision-bumping observer registered for the doc's lifetime.
     _update_sub: Subscription,
+    /// The last [`state_vector`](Self::state_vector) encoding and the revision
+    /// it was taken at: the vector only changes when the document does, and
+    /// every change bumps the revision.
+    sv_cache: Mutex<Option<(u64, Vec<u8>)>>,
 }
 
 impl CrdtDoc {
     /// Create a document for the replica identified by `actor_id` (the yrs client
     /// id). Two replicas must use distinct ids.
     pub fn new(actor_id: u64) -> Self {
+        Self::with_update_log(actor_id, true)
+    }
+
+    /// [`new`](Self::new) for a replica that never relays its local updates
+    /// verbatim - one that syncs only by state-vector anti-entropy
+    /// ([`state_vector`](Self::state_vector) / [`encode_update_since`](Self::encode_update_since))
+    /// or by full state. Its local writes skip encoding an update nobody will
+    /// drain (and the buffer that would otherwise grow for the document's life);
+    /// [`take_local_updates`](Self::take_local_updates) always returns nothing.
+    /// Everything else, the revision counter included, behaves as for `new`.
+    pub fn new_unlogged(actor_id: u64) -> Self {
+        Self::with_update_log(actor_id, false)
+    }
+
+    fn with_update_log(actor_id: u64, log_local_updates: bool) -> Self {
         // A FRESH yrs client id, deliberately not `actor_id`.
         //
         // These are two different things and binding them together loses data.
@@ -118,13 +201,24 @@ impl CrdtDoc {
         let revision_for_obs = Arc::clone(&revision);
         let pending_for_obs = Arc::clone(&pending);
         let remote_for_obs = Arc::clone(&applying_remote);
+        // Subscribed to transaction *cleanup*, not to `update_v1`: while an
+        // `update_v1` subscriber exists, yrs encodes every committed
+        // transaction for it - including every remote apply and every full
+        // load, whose encoding was thrown away here (they are already in the
+        // log they came from). Cleanup fires at the same point of the commit,
+        // just before the update event, with the same "anything changed" test,
+        // and `encode_update_v1` is exactly what yrs would have encoded - so
+        // the buffered bytes are unchanged and only local mutations pay.
         let update_sub = doc
-            .observe_update_v1(move |_txn, event| {
+            .observe_transaction_cleanup(move |txn, event| {
+                if event.delete_set.is_empty() && event.after_state == event.before_state {
+                    return;
+                }
                 revision_for_obs.fetch_add(1, Ordering::Relaxed);
                 // Buffer this update for broadcast only if it's a local mutation; a
                 // remote apply (flag set) is already in the log we pulled it from.
-                if !remote_for_obs.load(Ordering::Relaxed) {
-                    pending_for_obs.lock().unwrap().push(event.update.clone());
+                if log_local_updates && !remote_for_obs.load(Ordering::Relaxed) {
+                    pending_for_obs.lock().unwrap().push(txn.encode_update_v1());
                 }
             })
             .expect("no transaction is active during construction");
@@ -137,6 +231,7 @@ impl CrdtDoc {
             pending,
             applying_remote,
             _update_sub: update_sub,
+            sv_cache: Mutex::new(None),
         }
     }
 
@@ -186,8 +281,8 @@ impl CrdtDoc {
         let txn = self.doc.transact();
         self.fields
             .iter(&txn)
+            .filter(|(k, _)| !k.starts_with(SEP))
             .map(|(k, _)| k.to_string())
-            .filter(|k| !k.starts_with(SEP))
             .collect()
     }
 
@@ -203,10 +298,11 @@ impl CrdtDoc {
         match self.fields.get(&txn, field) {
             None => Ok(None),
             Some(out) => {
-                let json = out.to_string(&txn);
-                let value = serde_json::from_str(&json).map_err(|source| CrdtError::ValueCodec {
-                    field: field.to_string(),
-                    source,
+                let value = with_text(out, &txn, |s| serde_json::from_str(s)).map_err(|source| {
+                    CrdtError::ValueCodec {
+                        field: field.to_string(),
+                        source,
+                    }
                 })?;
                 Ok(Some(value))
             }
@@ -219,6 +315,8 @@ impl CrdtDoc {
         format!("{SEP}c{SEP}{field}{SEP}{actor}")
     }
 
+    // Stays a `String`: `counter` runs this once per read over every key, and
+    // the stack `Name` measured +523K Ir on the sim's convergence probes.
     fn counter_prefix(field: &str) -> String {
         format!("{SEP}c{SEP}{field}{SEP}")
     }
@@ -226,15 +324,22 @@ impl CrdtDoc {
     /// Add `delta` (which may be negative) to a PN-counter field. Each actor
     /// accumulates into its own subtotal, so concurrent increments merge by sum.
     pub fn increment(&self, field: &str, delta: i64) {
-        let key = Self::counter_key(field, self.actor);
+        let mut on_stack = StackStr::<96>::new();
+        let key: Cow<str> = if write!(on_stack, "{SEP}c{SEP}{field}{SEP}{}", self.actor).is_ok() {
+            Cow::Borrowed(on_stack.as_str())
+        } else {
+            Cow::Owned(Self::counter_key(field, self.actor))
+        };
         let mut txn = self.doc.transact_mut();
         let current: i64 = match self.fields.get(&txn, &key) {
-            Some(out) => out.to_string(&txn).parse().unwrap_or(0),
+            Some(out) => with_text(out, &txn, |s| s.parse().unwrap_or(0)),
             None => 0,
         };
         // Stored as a decimal string (everything in the map is a string), so the
-        // value codec stays uniform with registers.
-        self.fields.insert(&mut txn, key, (current + delta).to_string());
+        // value codec stays uniform with registers. An i64 is at most 20 digits.
+        let mut value = StackStr::<24>::new();
+        write!(value, "{}", current + delta).expect("an i64 fits in 24 bytes");
+        self.fields.insert(&mut txn, &*key, value.as_str());
     }
 
     /// The current value of a PN-counter field: the sum of every actor's subtotal.
@@ -244,14 +349,14 @@ impl CrdtDoc {
         self.fields
             .iter(&txn)
             .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(_, v)| v.to_string(&txn).parse::<i64>().unwrap_or(0))
+            .map(|(_, v)| with_text(v, &txn, |s| s.parse::<i64>().unwrap_or(0)))
             .sum()
     }
 
     // ─── Y.Text (collaborative sequence) ─────────────────────────────────────
 
-    fn text_name(field: &str) -> String {
-        format!("text{SEP}{field}")
+    fn text_name(field: &str) -> Name {
+        Name::new(format_args!("text{SEP}{field}"))
     }
 
     /// Append `content` to a collaborative text field.
@@ -301,15 +406,16 @@ impl CrdtDoc {
     // never saw is a different block, so it survives — add-wins. Tombstones for
     // removed occurrences are yrs's job.
 
-    fn set_name(field: &str) -> String {
-        format!("set{SEP}{field}")
+    fn set_name(field: &str) -> Name {
+        Name::new(format_args!("set{SEP}{field}"))
     }
 
     /// Add `element` to an OR-Set field.
     pub fn set_add(&self, field: &str, element: &str) {
         let mut txn = self.doc.transact_mut();
         let arr = txn.get_or_insert_array(Self::set_name(field).as_str());
-        arr.push_back(&mut txn, element.to_string());
+        // `&str` becomes the same `Any::String` a `String` would, minus the copy.
+        arr.push_back(&mut txn, element);
     }
 
     /// Remove every currently-observed occurrence of `element` from an OR-Set
@@ -321,7 +427,7 @@ impl CrdtDoc {
         // stay valid as we remove.
         let mut matches = Vec::new();
         for (i, out) in arr.iter(&txn).enumerate() {
-            if out.to_string(&txn) == element {
+            if with_text(out, &txn, |s| s == element) {
                 matches.push(i as u32);
             }
         }
@@ -334,7 +440,7 @@ impl CrdtDoc {
     pub fn set_contains(&self, field: &str, element: &str) -> bool {
         let txn = self.doc.transact();
         match txn.get_array(Self::set_name(field).as_str()) {
-            Some(arr) => arr.iter(&txn).any(|out| out.to_string(&txn) == element),
+            Some(arr) => arr.iter(&txn).any(|out| with_text(out, &txn, |s| s == element)),
             None => false,
         }
     }
@@ -377,7 +483,16 @@ impl CrdtDoc {
     /// This document's state vector (the per-actor version frontier), v1-encoded.
     /// A peer sends this to ask "what have I not seen?"
     pub fn state_vector(&self) -> Vec<u8> {
-        self.doc.transact().state_vector().encode_v1()
+        let revision = self.revision();
+        let mut cache = self.sv_cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((at, sv)) = cache.as_ref() {
+            if *at == revision {
+                return sv.clone();
+            }
+        }
+        let sv = self.doc.transact().state_vector().encode_v1();
+        *cache = Some((revision, sv.clone()));
+        sv
     }
 
     /// Encode the updates this document has that a peer at `their_state_vector`
@@ -426,6 +541,23 @@ impl CrdtDoc {
         result
     }
 
+    /// A causal read's question in one transaction: `Ok(state_vector)` if this
+    /// document has caught up to `peer_state_vector` (the same bytes
+    /// [`state_vector`](Self::state_vector) returns), else `Err(lag)` with
+    /// [`ops_behind`](Self::ops_behind)'s count. Asking the two separately
+    /// opened two transactions and built this document's state vector twice.
+    pub fn caught_up_state_vector(
+        &self,
+        peer_state_vector: &[u8],
+    ) -> CrdtResult<Result<Vec<u8>, usize>> {
+        let peer = StateVector::decode_v1(peer_state_vector)
+            .map_err(|e| CrdtError::DecodeStateVector(e.to_string()))?;
+        let txn = self.doc.transact();
+        let mine = txn.state_vector();
+        let missing = missing_ops(&peer, &mine);
+        Ok(if missing == 0 { Ok(mine.encode_v1()) } else { Err(missing) })
+    }
+
     /// **Convergence lag**: how many operations a peer (described by its
     /// `peer_state_vector`) has that this replica has not yet seen. Zero means
     /// this replica is caught up to the peer's announced frontier. The replica
@@ -434,14 +566,18 @@ impl CrdtDoc {
         let peer = StateVector::decode_v1(peer_state_vector)
             .map_err(|e| CrdtError::DecodeStateVector(e.to_string()))?;
         let txn = self.doc.transact();
-        let mine = txn.state_vector();
-        let mut missing = 0usize;
-        for (client, peer_clock) in peer.iter() {
-            let my_clock = mine.get(client);
-            if *peer_clock > my_clock {
-                missing += (*peer_clock - my_clock) as usize;
-            }
-        }
-        Ok(missing)
+        Ok(missing_ops(&peer, &txn.state_vector()))
     }
+}
+
+/// How many operations `peer` has that `mine` lacks.
+fn missing_ops(peer: &StateVector, mine: &StateVector) -> usize {
+    let mut missing = 0usize;
+    for (client, peer_clock) in peer.iter() {
+        let my_clock = mine.get(client);
+        if *peer_clock > my_clock {
+            missing += (*peer_clock - my_clock) as usize;
+        }
+    }
+    missing
 }

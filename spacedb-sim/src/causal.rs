@@ -14,6 +14,8 @@
 //! come back `Stale`, not silently old. Same scenario + seed ⇒ identical
 //! [`CausalReport`].
 
+use std::rc::Rc;
+
 use spacedb_consistency::{CausalSession, Outcome, Tier};
 use spacedb_crdt::CrdtDoc;
 
@@ -51,7 +53,7 @@ impl CausalScenario {
 enum CEvent {
     Write,
     Read,
-    Deliver { to: usize, update: Vec<u8> },
+    Deliver { to: usize, update: Rc<[u8]> },
 }
 
 /// The outcome of a causal stress run.
@@ -87,7 +89,8 @@ pub struct CausalSim {
 impl CausalSim {
     pub fn new(scenario: CausalScenario) -> Self {
         let replicas = (0..scenario.replicas)
-            .map(|i| CrdtDoc::new(i as u64 + 1))
+            // Full-state propagation only: nothing drains a local-update log.
+            .map(|i| CrdtDoc::new_unlogged(i as u64 + 1))
             .collect();
         let mut scheduler = Scheduler::new();
         scheduler.schedule(scenario.write_interval, CEvent::Write);
@@ -134,11 +137,12 @@ impl CausalSim {
                 self.session.record_write(&self.replicas[0]);
                 self.writes += 1;
                 // propagate the home's state to the others with reordering delays
-                let update = self.replicas[0].encode_full();
+                // One encoding, shared by every recipient (was cloned per recipient).
+                let update: Rc<[u8]> = self.replicas[0].encode_full().into();
                 for to in 1..self.replicas.len() {
                     let delay = self.scenario.prop_base + self.rng.below(self.scenario.prop_jitter + 1);
                     self.scheduler
-                        .schedule(delay, CEvent::Deliver { to, update: update.clone() });
+                        .schedule(delay, CEvent::Deliver { to, update: Rc::clone(&update) });
                 }
                 if self.scheduler.now() < self.scenario.horizon {
                     self.scheduler.schedule(self.scenario.write_interval, CEvent::Write);

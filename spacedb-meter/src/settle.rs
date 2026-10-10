@@ -69,7 +69,12 @@ impl Settlement for LocalSettlement {
             settles_to_did: claim.settles_to_did.clone(),
             micro_mata,
         };
-        *self.tally.entry(claim.settles_to_did.clone()).or_default() += micro_mata;
+        match self.tally.get_mut(&claim.settles_to_did) {
+            Some(total) => *total += micro_mata,
+            None => {
+                self.tally.insert(claim.settles_to_did.clone(), micro_mata);
+            }
+        }
         self.settled.push(receipt.clone());
         Ok(receipt)
     }

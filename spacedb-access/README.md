@@ -100,6 +100,23 @@ deletion.
 Identities are ECDSA **P-256 / ES256**, the same primitive as mID — so MATA's
 real mIDs verify here identically, with no MATA dependency in this crate.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_access.rs`; outputs unchanged by every change.
+Release build, 0.6.0 -> 0.7.0: **1,362.5M -> 95.6M instructions (-93.0%)**.
+
+- Verified signatures are remembered per process, keyed by BLAKE3 of the
+  key, the message digest and the signature; only successes are kept, the
+  cache is bounded, and a bad signature is checked in full every time. A P-256
+  verify is ~5M instructions; the cache check is one short hash.
+- `HeldCapability`: a session's credential re-verifies only when the issuer's
+  published key changes (`KeyDirectory::published_key_is`, compared in place).
+- The audit log encodes into reused buffers, parses the node key only if an
+  entry needs verifying, and records the signature it just produced as
+  verified (a tampered entry is a different cache identity and is verified in
+  full).
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

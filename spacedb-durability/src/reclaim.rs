@@ -54,7 +54,6 @@ pub fn reclaim(
     placement: &Placement,
     fleet: &Fleet,
 ) -> DurabilityResult<ReclaimReport> {
-    let online = fleet.online_targets();
     let mut report = ReclaimReport::default();
 
     for shard_ref in &manifest.shards {
@@ -70,24 +69,16 @@ pub fn reclaim(
             continue;
         }
 
-        for t in &online {
-            if &t.id == placed {
+        for node in fleet.online_nodes() {
+            if &node.id == placed {
                 continue; // the live copy — keep it
             }
-            let node = match fleet.node(&t.id) {
-                Some(n) => n,
-                None => continue,
-            };
-            if node.store().has(&shard_ref.hash)? {
-                let freed = node
-                    .store()
-                    .get(&shard_ref.hash)?
-                    .map(|b| b.len() as u64)
-                    .unwrap_or(0);
+            if let Some(len) = node.store().len_of(&shard_ref.hash)? {
+                let freed = len as u64;
                 node.store().delete(&shard_ref.hash)?;
                 report.bytes_reclaimed += freed;
                 report.reclaimed.push(ReclaimedCopy {
-                    target: t.id.clone(),
+                    target: node.id.clone(),
                     shard_index: shard_ref.index,
                 });
             }

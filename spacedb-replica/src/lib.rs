@@ -22,7 +22,7 @@ mod error;
 pub use error::{ReplicaError, ReplicaResult};
 
 mod message;
-pub use message::SyncMessage;
+pub use message::{SyncFrame, SyncMessage};
 
 mod transport;
 pub use transport::{connected_pair, InProcessTransport, Link, Transport};

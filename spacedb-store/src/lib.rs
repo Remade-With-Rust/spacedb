@@ -34,7 +34,7 @@ mod error;
 pub use error::{StoreError, StoreResult};
 
 pub mod codec;
-pub use codec::{decode_value, encode_value, KeyDecode, KeyEncode};
+pub use codec::{decode_value, encode_value, Bytes, KeyDecode, KeyEncode};
 
 pub mod engine;
 pub use engine::{Durability, KvEngine, ReadTx, Readable, WriteTx};

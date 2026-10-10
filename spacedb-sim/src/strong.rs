@@ -12,6 +12,7 @@
 //! the agent simply stops — it can never overspend. Same scenario + seed ⇒ identical
 //! [`StrongReport`].
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use spacedb_consistency::{QuorumGroup, StrongResult};
@@ -99,6 +100,10 @@ pub struct StrongSim {
     quorum: QuorumGroup,
     clients: Vec<Client>,
     owners: HashMap<String, String>,
+    /// `agent{i}`, `user{i}` and `m{i}`, formatted once instead of per op.
+    agent_names: Vec<String>,
+    user_keys: Vec<String>,
+    member_names: Vec<String>,
     commits: u64,
     rejects: u64,
     unavailables: u64,
@@ -110,8 +115,10 @@ pub struct StrongSim {
 impl StrongSim {
     pub fn new(scenario: StrongScenario) -> Self {
         let mut rng = Rng::seed(scenario.seed);
-        let member_ids: Vec<String> = (0..scenario.members).map(|i| format!("m{i}")).collect();
-        let mut quorum = QuorumGroup::new(member_ids);
+        let member_names: Vec<String> = (0..scenario.members).map(|i| format!("m{i}")).collect();
+        let mut quorum = QuorumGroup::new(member_names.iter().cloned());
+        let agent_names = (0..scenario.clients).map(|i| format!("agent{i}")).collect();
+        let user_keys = (0..scenario.usernames).map(|i| format!("user{i}")).collect();
         quorum.init_seats("seats", scenario.seats);
 
         let clients = (0..scenario.clients)
@@ -133,6 +140,9 @@ impl StrongSim {
             quorum,
             clients,
             owners: HashMap::new(),
+            agent_names,
+            user_keys,
+            member_names,
             commits: 0,
             rejects: 0,
             unavailables: 0,
@@ -152,7 +162,7 @@ impl StrongSim {
 
         // Heal everything before the final read so the seat count is observable.
         for i in 0..self.scenario.members {
-            self.quorum.heal(&format!("m{i}"));
+            self.quorum.heal(&self.member_names[i]);
         }
         let final_seats_remaining = self.quorum.seats_remaining("seats").unwrap_or(0);
 
@@ -196,18 +206,24 @@ impl StrongSim {
                 self.clients[client].budget.charge(cost).expect("affordable");
                 self.total_charged += cost;
 
-                let owner = format!("agent{client}");
+                let owner = &self.agent_names[client];
                 if self.rng.chance(0.5) {
-                    let key = format!("user{}", self.rng.below(self.scenario.usernames as u64));
-                    match self.quorum.claim_unique(&key, owner.as_bytes()) {
+                    let key = &self.user_keys[self.rng.below(self.scenario.usernames as u64) as usize];
+                    match self.quorum.claim_unique(key, owner.as_bytes()) {
                         StrongResult::Committed => {
                             self.commits += 1;
-                            if let Some(prev) = self.owners.get(&key) {
-                                if prev != &owner {
-                                    self.uniqueness_violation = true;
+                            // Owned copies only for a commit, not for every op.
+                            match self.owners.entry(key.clone()) {
+                                Entry::Occupied(mut prev) => {
+                                    if prev.get() != owner {
+                                        self.uniqueness_violation = true;
+                                    }
+                                    prev.insert(owner.clone());
+                                }
+                                Entry::Vacant(slot) => {
+                                    slot.insert(owner.clone());
                                 }
                             }
-                            self.owners.insert(key, owner);
                         }
                         StrongResult::Rejected(_) => self.rejects += 1,
                         StrongResult::Unavailable(_) => self.unavailables += 1,
@@ -230,14 +246,14 @@ impl StrongSim {
             }
             SEvent::Partition => {
                 for i in 0..self.scenario.partition_size.min(self.scenario.members) {
-                    self.quorum.partition(&format!("m{i}"));
+                    self.quorum.partition(&self.member_names[i]);
                 }
                 self.scheduler
                     .schedule(self.scenario.partition_duration, SEvent::Heal);
             }
             SEvent::Heal => {
                 for i in 0..self.scenario.members {
-                    self.quorum.heal(&format!("m{i}"));
+                    self.quorum.heal(&self.member_names[i]);
                 }
                 if self.scheduler.now() < self.scenario.horizon {
                     self.scheduler

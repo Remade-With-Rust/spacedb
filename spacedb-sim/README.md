@@ -79,6 +79,21 @@ machine. That is the whole value: a failure you can replay.
 This is a twin of the **database** — open-core, no maestro / Iron Bank. The full
 economic twin is a separate, proprietary system.
 
+## Performance (0.7.0)
+
+Measured on exact instruction counts (callgrind) with this crate's
+deterministic driver, `examples/ir_sim.rs`; outputs unchanged by every change.
+Release build, 0.6.0 -> 0.7.0: **2,060.5M -> 1,666.7M instructions (-19.1%)**; every report identical.
+
+- Replicas are `CrdtDoc::new_unlogged` (they sync by state vector or full
+  state, so nothing drains a local-update log).
+- The churn twin skips a repair when health shows every shard reachable and a
+  reclaim when there is no surplus - both would return empty reports.
+- The strong twin formats its agent, username and member names once.
+- Causal fan-out shares one encoded state between recipients.
+- The simulator doubles as the instruction-count driver (`examples/ir_sim.rs`)
+  for the crates it runs: crdt, replica, consistency and durability.
+
 ## Testing
 
 The workspace defaults to `wasm32`; this crate is native. Test on your host

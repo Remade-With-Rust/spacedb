@@ -93,6 +93,13 @@ impl Fleet {
             .collect()
     }
 
+    /// The online nodes themselves - for a caller that wants each online
+    /// node's store, which `online_targets` + `node` found by cloning every
+    /// id and domain and then searching the fleet for each id again.
+    pub(crate) fn online_nodes(&self) -> impl Iterator<Item = &Node> {
+        self.nodes.iter().filter(|n| n.online)
+    }
+
     /// Number of online nodes.
     pub fn online_count(&self) -> usize {
         self.nodes.iter().filter(|n| n.online).count()

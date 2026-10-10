@@ -1,6 +1,6 @@
 [package]
 name = "spacedb-sim"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.95"
 readme = "README.md"
@@ -26,3 +26,7 @@ spacedb-durability = { workspace = true }
 spacedb-consistency = { workspace = true }
 spacedb-meter = { workspace = true }
 spacedb-console = { workspace = true }
+
+[dev-dependencies]
+# Pins yrs client ids in the `ir_*` instruction-count drivers (examples only).
+fastrand = "2"

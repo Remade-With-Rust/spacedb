@@ -79,12 +79,11 @@ pub struct QueryOutcome {
 }
 
 /// Frame two partials for the `reduce` ABI: `len(a) ‖ a ‖ b`.
-fn frame_pair(a: &[u8], b: &[u8]) -> Vec<u8> {
-    let mut framed = Vec::with_capacity(4 + a.len() + b.len());
+fn frame_pair_into(framed: &mut Vec<u8>, a: &[u8], b: &[u8]) {
+    framed.clear();
     framed.extend_from_slice(&(a.len() as u32).to_le_bytes());
     framed.extend_from_slice(a);
     framed.extend_from_slice(b);
-    framed
 }
 
 /// Run `plan` over `shards`: map each reachable shard's snapshot, then reduce the
@@ -117,10 +116,13 @@ pub fn run_query(
     let output = if partials.is_empty() {
         None
     } else {
-        let mut acc = partials[0].clone();
-        for partial in &partials[1..] {
-            let exec = runtime.run(plan.reduce_wasm, &frame_pair(&acc, partial), &plan.limits)?;
-            acc = exec.output;
+        // Moved, not cloned; and one framing buffer serves every reduce step.
+        let mut partials = partials.into_iter();
+        let mut acc = partials.next().expect("partials is non-empty");
+        let mut framed = Vec::new();
+        for partial in partials {
+            frame_pair_into(&mut framed, &acc, &partial);
+            acc = runtime.run(plan.reduce_wasm, &framed, &plan.limits)?.output;
         }
         Some(acc)
     };

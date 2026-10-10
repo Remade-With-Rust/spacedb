@@ -1,6 +1,6 @@
 [package]
 name = "spacedb-sdk"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.95"
 readme = "README.md"
@@ -21,7 +21,7 @@ crate-type = ["rlib"]
 [dependencies]
 # Optional so `default-features = false` genuinely removes it from the graph,
 # not merely from a cfg.
-rusty_alloc-api = { version = "=1.1.6", optional = true }
+rusty_alloc-api = { version = "=2.2.6", optional = true }
 spacedb-crdt = { workspace = true }
 spacedb-access = { workspace = true }
 spacedb-consistency = { workspace = true }
@@ -37,3 +37,7 @@ rusty-alloc = ["dep:rusty_alloc-api"]
 # Guard pages + encrypted free lists. ~4-7% instructions (measured); worth it
 # for a node exposed to untrusted input.
 secure = ["rusty-alloc", "rusty_alloc-api/secure"]
+
+[dev-dependencies]
+# Pins yrs client ids in the `ir_*` instruction-count drivers (examples only).
+fastrand = "2"

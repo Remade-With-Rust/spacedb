@@ -61,6 +61,13 @@ pub trait WriteTx: Readable {
     /// Insert or overwrite `key` → `val` in `table`.
     fn put_raw(&mut self, table: &str, key: &[u8], val: &[u8]) -> StoreResult<()>;
 
+    /// [`put_raw`](Self::put_raw) taking ownership of the bytes, for a caller
+    /// that built them only to store them: an engine that keeps owned buffers
+    /// moves them in instead of copying. The default copies, as `put_raw` does.
+    fn put_raw_owned(&mut self, table: &str, key: Vec<u8>, val: Vec<u8>) -> StoreResult<()> {
+        self.put_raw(table, &key, &val)
+    }
+
     /// Remove `key` from `table`. Returns `true` if a value was present.
     fn delete_raw(&mut self, table: &str, key: &[u8]) -> StoreResult<bool>;
 

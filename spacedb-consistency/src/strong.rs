@@ -128,28 +128,29 @@ impl QuorumGroup {
         }
     }
 
-    fn online_indices(&self) -> Vec<usize> {
-        (0..self.members.len())
-            .filter(|&i| self.members[i].online)
-            .collect()
+    /// [`read`](Self::read), borrowing the winning value instead of cloning it.
+    fn latest(&self, key: &str) -> Result<(Option<&[u8]>, u64), UnavailableReason> {
+        if self.online_count() < self.majority() {
+            return Err(UnavailableReason::QuorumUnreachable);
+        }
+        let best = self
+            .members
+            .iter()
+            .filter(|m| m.online)
+            .filter_map(|m| m.store.get(key))
+            .max_by_key(|(_, version)| *version);
+        Ok(match best {
+            Some((value, version)) => (Some(value.as_slice()), *version),
+            None => (None, 0),
+        })
     }
 
     /// Read the latest committed `(value, version)` for `key` from a quorum. The
     /// highest version across any reachable majority is the latest committed
     /// value (any two majorities overlap). Errors if a majority isn't reachable.
     pub fn read(&self, key: &str) -> Result<(Option<Vec<u8>>, u64), UnavailableReason> {
-        let online = self.online_indices();
-        if online.len() < self.majority() {
-            return Err(UnavailableReason::QuorumUnreachable);
-        }
-        let best = online
-            .iter()
-            .filter_map(|&i| self.members[i].store.get(key))
-            .max_by_key(|(_, version)| *version);
-        Ok(match best {
-            Some((value, version)) => (Some(value.clone()), *version),
-            None => (None, 0),
-        })
+        let (value, version) = self.latest(key)?;
+        Ok((value.map(<[u8]>::to_vec), version))
     }
 
     /// Compare-and-set: commit `new_value` at `expected_version + 1` to a majority,
@@ -157,23 +158,37 @@ impl QuorumGroup {
     /// `Unavailable` if no majority is reachable (nothing is written); `Rejected`
     /// if a concurrent writer already advanced the version.
     pub fn cas(&mut self, key: &str, expected_version: u64, new_value: Vec<u8>) -> StrongResult {
-        let online = self.online_indices();
-        if online.len() < self.majority() {
+        if self.online_count() < self.majority() {
             return StrongResult::Unavailable(UnavailableReason::QuorumUnreachable);
         }
-        let current = online
+        let current = self
+            .members
             .iter()
-            .filter_map(|&i| self.members[i].store.get(key).map(|(_, v)| *v))
+            .filter(|m| m.online)
+            .filter_map(|m| m.store.get(key).map(|(_, v)| *v))
             .max()
             .unwrap_or(0);
         if current != expected_version {
             return StrongResult::Rejected(RejectReason::VersionConflict);
         }
         let new_version = expected_version + 1;
-        for &i in &online {
-            self.members[i]
-                .store
-                .insert(key.to_string(), (new_value.clone(), new_version));
+        let mut online = self.members.iter_mut().filter(|m| m.online).peekable();
+        let mut value = Some(new_value);
+        while let Some(member) = online.next() {
+            // Every member but the last gets a copy; the last takes the value.
+            let v = if online.peek().is_some() {
+                value.clone().expect("taken only by the last member")
+            } else {
+                value.take().expect("taken only by the last member")
+            };
+            // Overwrite in place where the key exists; allocate it only for a
+            // member seeing the key for the first time.
+            match member.store.get_mut(key) {
+                Some(slot) => *slot = (v, new_version),
+                None => {
+                    member.store.insert(key.to_string(), (v, new_version));
+                }
+            }
         }
         StrongResult::Committed
     }
@@ -181,11 +196,11 @@ impl QuorumGroup {
     /// Claim a uniqueness `key` for `owner`. Succeeds only if unclaimed; a second
     /// claimant is [`RejectReason::AlreadyClaimed`].
     pub fn claim_unique(&mut self, key: &str, owner: &[u8]) -> StrongResult {
-        let (current, version) = match self.read(key) {
-            Ok(read) => read,
+        let (claimed, version) = match self.latest(key) {
+            Ok((current, version)) => (current.is_some(), version),
             Err(reason) => return StrongResult::Unavailable(reason),
         };
-        if current.is_some() {
+        if claimed {
             return StrongResult::Rejected(RejectReason::AlreadyClaimed);
         }
         self.cas(key, version, owner.to_vec())
@@ -203,11 +218,10 @@ impl QuorumGroup {
     /// Acquire one unit of a non-negative resource. [`RejectReason::Exhausted`] at
     /// zero — never oversells.
     pub fn acquire_seat(&mut self, key: &str) -> StrongResult {
-        let (current, version) = match self.read(key) {
-            Ok(read) => read,
+        let (remaining, version) = match self.latest(key) {
+            Ok((current, version)) => (decode_count(current), version),
             Err(reason) => return StrongResult::Unavailable(reason),
         };
-        let remaining = decode_count(current.as_deref());
         if remaining == 0 {
             return StrongResult::Rejected(RejectReason::Exhausted);
         }

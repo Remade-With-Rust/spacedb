@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::distribute::recover;
-use crate::erasure::{content_hash, encode_snapshot, Manifest};
+use crate::erasure::{encode_snapshot, Manifest};
 use crate::error::{DurabilityError, DurabilityResult};
 use crate::fleet::Fleet;
 use crate::placement::{Placement, TargetId, TargetInfo};
@@ -46,7 +46,7 @@ pub fn repair(
 ) -> DurabilityResult<RepairReport> {
     // 1. Classify shards; track which homes/domains already hold a survivor.
     let mut missing: Vec<u16> = Vec::new();
-    let mut surviving_homes: HashSet<TargetId> = HashSet::new();
+    let mut surviving_homes: HashSet<&TargetId> = HashSet::new();
     let mut domain_load: HashMap<String, usize> = HashMap::new();
 
     for shard_ref in &manifest.shards {
@@ -57,7 +57,7 @@ pub fn repair(
             None => false,
         };
         if reachable {
-            surviving_homes.insert(target.clone());
+            surviving_homes.insert(target);
             if let Some(n) = node {
                 *domain_load.entry(n.domain.clone()).or_default() += 1;
             }
@@ -99,7 +99,7 @@ pub fn repair(
 
     // 3. Reconstruct + deterministically re-encode to regenerate every shard.
     let snapshot = recover(manifest, placement, fleet)?;
-    let (_regen_manifest, all_shards) =
+    let (regen_manifest, mut all_shards) =
         encode_snapshot(&snapshot, needed, manifest.parity_shards as usize)?;
 
     // 4. Re-place each missing shard on a fresh home in the least-loaded domain.
@@ -114,10 +114,11 @@ pub fn repair(
             .ok_or_else(|| DurabilityError::Placement("no fresh target for repair".into()))?;
         let chosen = fresh.remove(pick);
 
-        let regenerated = &all_shards[index as usize];
         let expected = &manifest.shards[index as usize];
         // Deterministic re-encode must reproduce the original shard byte-for-byte.
-        if content_hash(&regenerated.bytes) != expected.hash {
+        // `encode_snapshot` already hashed every shard it produced; compare that
+        // rather than hashing the shard a second time.
+        if regen_manifest.shards[index as usize].hash != expected.hash {
             return Err(DurabilityError::Erasure(format!(
                 "re-encoded shard {index} does not match the manifest"
             )));
@@ -126,9 +127,12 @@ pub fn repair(
         let node = fleet
             .node(&chosen.id)
             .ok_or_else(|| DurabilityError::UnknownTarget(chosen.id.0.clone()))?;
-        node.store().put(&expected.hash, &regenerated.bytes)?;
+        // Each missing index appears once, so its regenerated shard is moved
+        // into the store rather than copied (the rest are dropped with the set).
+        let regenerated = std::mem::take(&mut all_shards[index as usize].bytes);
+        node.store().put_owned(&expected.hash, regenerated)?;
 
-        new_targets[index as usize] = chosen.id.clone();
+        new_targets[index as usize] = chosen.id;
         *domain_load.entry(chosen.domain).or_default() += 1;
         repaired.push(index);
     }
