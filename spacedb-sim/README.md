@@ -83,7 +83,7 @@ economic twin is a separate, proprietary system.
 
 Measured on exact instruction counts (callgrind) with this crate's
 deterministic driver, `examples/ir_sim.rs`; outputs unchanged by every change.
-Release build, 0.6.0 -> 0.7.0: **2,060.5M -> 1,666.7M instructions (-19.1%)**; every report identical.
+Release build, 0.6.0 -> 0.7.0: **2,060.5M -> 1,664.9M instructions (-19.2%)**; every report identical.
 
 - Replicas are `CrdtDoc::new_unlogged` (they sync by state vector or full
   state, so nothing drains a local-update log).
