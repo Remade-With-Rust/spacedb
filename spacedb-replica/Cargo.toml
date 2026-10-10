@@ -24,3 +24,7 @@ spacedb-crdt = { workspace = true }
 
 # Typed errors.
 thiserror = "1"
+
+[dev-dependencies]
+# Pins yrs client ids in the `ir_*` instruction-count drivers (examples only).
+fastrand = "2"
