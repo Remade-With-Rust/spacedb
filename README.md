@@ -23,6 +23,19 @@ shard store, key directory, settlement); MATA runs the mesh of homes, the placem
 network, mID access, and `$MATA` settlement behind them. The library is yours; the _network_
 is the product. So: **integrate locally with SpaceDB, distribute with disco.**
 
+## In The Wild with 14,019 Active Installs
+
+> [MATA Network](https://mata.network) is hosting the greatest Disco Party on Earth. A Disco Party is a
+> sovereign distributed cloud and digital freedom toolkit by MATA enabling ownership and accessibility of data.
+
+> [DLDeploy.com](https://DLDEPLOY.COM) uses over a dozen Remade with Rust portfolio tools to provide browser based
+> AI, and deploys the entire rusty_ESP portfolio for zero-C Espressif technology on ESP-32.
+
+> [RAG Converter](https://ragconverter.com) is a browser based, completely local AI tool deploying Mercury and Carmenta to do local,
+> realtime conversion of business documents to RAG data. API built for businesses to make emails, pdf, images, and videos available to AI.
+
+> Build the new internet with our <a href="https://drive.google.com/drive/folders/1VjvP1zSJWH1DmkTqL1qEPt3OM8Ub8jPX?usp=drive_link">AI skills for Rust</a>. Create on any platform with security by design.
+
 ---
 
 ## Quick start
