@@ -126,15 +126,32 @@ pub(crate) fn pack_value_in_place(row: &mut Vec<u8>, at: usize, policy: Compress
     if let Compression::On { level, min_len } = policy {
         let plain_len = row.len() - at - 1;
         if plain_len >= min_len {
-            if let Ok(z) = rusty_zstd::compress_with(&row[at + 1..], row_compress_options(level)) {
-                if z.len() < plain_len {
+            // The frame is built in this thread's one buffer and copied into
+            // the row only when it is the shorter form; a fresh `Vec` per row
+            // (sized to the compression bound) was allocated and freed for
+            // every row, compressible or not.
+            FRAME.with(|frame| {
+                let mut frame = frame.borrow_mut();
+                frame.clear();
+                let ok = rusty_zstd::compress_into_with(
+                    &mut frame,
+                    &row[at + 1..],
+                    row_compress_options(level),
+                )
+                .is_ok();
+                if ok && frame.len() < plain_len {
                     row.truncate(at);
                     row.push(FORMAT_ZSTD);
-                    row.extend_from_slice(&z);
+                    row.extend_from_slice(&frame);
                 }
-            }
+            });
         }
     }
+}
+
+std::thread_local! {
+    /// The compressed frame of the row being packed, reused across rows.
+    static FRAME: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Unwrap a prefixed payload back to the encoded value. The input is

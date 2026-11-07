@@ -209,7 +209,7 @@ Each crate's README covers its own API, guarantees, and seams.
 
 ---
 
-## Status — Phase 1 complete (performance passes in 0.7.0 and 0.7.2)
+## Status — Phase 1 complete (performance passes in 0.7.0, 0.7.2 and 0.7.3)
 
 All eight milestones built, **fully tested on the native target, zero warnings**:
 
@@ -239,6 +239,30 @@ All eight milestones built, **fully tested on the native target, zero warnings**
   transit), rate-card pricing + agent budgets, a `Settlement` seam (a host plugs
   in `UsageClaim → Maestro → EarningRecord → Iron Bank`); the developer SDK above;
   and the operator console.
+
+## Performance (0.7.3)
+
+0.7.3 moves spacedb-store to rusty_zstd 0.4.2, whose new
+`compress_into_with` appends a frame to a caller's buffer. A row is now
+compressed into one buffer per thread and copied into the row only when the
+compressed form is shorter; before, every row compressed allocated (and freed)
+a fresh buffer sized to the compression bound, whether it was kept or not.
+Same harness and drivers as 0.7.2, outputs unchanged:
+
+| driver | 0.7.2 | 0.7.3 | change |
+|---|---:|---:|---:|
+| `ir_redb` (sealed rows on redb) | 330.43M | 329.51M | -0.28% |
+| `ir_store` (sealed rows, in-memory engine) | 191.17M | 190.99M | -0.09% |
+| `ir_crdt` (every CRDT type + sealed persistence) | 130.78M | 130.83M | +0.04% |
+| the other twelve | | | within 0.02% |
+| **all fifteen** | **2,598.99M** | **2,597.94M** | **-0.04%** |
+
+The stored bytes are identical to 0.7.2's (rusty_zstd 0.4.2 emits exactly the
+frames 0.4.1 did), so rows written by either version read in the other. No
+API change; `cargo semver-checks` against 0.7.2 passes. rusty_zstd 0.4.2's
+optional `rusty-alloc` feature goes through rusty_alloc_default 0.1.5, which
+pins `rusty_alloc-api` 2.4.0, the same release spacedb-sdk pins; SpaceDB does
+not enable that feature.
 
 ## Performance (0.7.2)
 

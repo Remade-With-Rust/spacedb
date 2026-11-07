@@ -79,6 +79,16 @@ Depends on **no** MATA crate. MATA-specific capability (vault key, identity,
 mesh replication, settlement) enters only through seams this crate defines. The
 dependency arrow is MATA → SpaceDB, never the reverse.
 
+## Performance (0.7.3)
+
+`ir_redb` 330.43M -> 329.51M (-0.28%), `ir_store` 191.17M -> 190.99M (-0.09%),
+outputs unchanged:
+
+- rusty_zstd 0.4.2 (from 0.4.1). Rows compress through its new
+  `compress_into_with` into one buffer per thread, copied into the row only
+  when shorter; no allocation per compressed row. Stored bytes are identical
+  to 0.7.2's.
+
 ## Performance (0.7.2)
 
 Measured on exact instruction counts (callgrind) with deterministic drivers
