@@ -28,7 +28,7 @@ mod runtime;
 pub use runtime::{Execution, FunctionRuntime, RunLimits};
 
 mod functions;
-pub use functions::{CtxRights, FunctionCtx, FunctionOutcome, RecordSnapshot};
+pub use functions::{CtxRights, FunctionCtx, FunctionOutcome, PinnedRecords, RecordSnapshot};
 
 mod snapshot;
 pub use snapshot::Snapshot;

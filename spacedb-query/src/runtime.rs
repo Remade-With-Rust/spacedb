@@ -25,10 +25,13 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
+use wasmtime::{
+    Config, Engine, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc,
+};
 
 use crate::corroborate::FunctionRun;
 use crate::error::{QueryError, QueryResult};
+use crate::functions::CtxHostState;
 
 /// Per-invocation bounds. Both are **deterministic** — fuel is an instruction
 /// count; the memory cap is in whole MB — so they bound execution identically on
@@ -79,6 +82,9 @@ pub struct FunctionRuntime {
     /// cheap `Arc` handle, and compilation is a pure function of the bytes and
     /// the engine config, so a cached module is indistinguishable from a fresh one.
     modules: Mutex<HashMap<[u8; 32], Module>>,
+    /// The Database-Function linker (`spacedb::host_call`), built once: it
+    /// depends only on the engine, and a run instantiates from it.
+    ctx_linker: Linker<CtxHostState>,
 }
 
 impl FunctionRuntime {
@@ -99,10 +105,17 @@ impl FunctionRuntime {
         // this slim feature set — and a determinism-bound runtime has no use for it.
         config.wasm_backtrace(false);
         let engine = Engine::new(&config).map_err(|e| QueryError::Engine(e.to_string()))?;
+        let ctx_linker = crate::functions::ctx_linker(&engine)?;
         Ok(Self {
             engine,
             modules: Mutex::new(HashMap::new()),
+            ctx_linker,
         })
+    }
+
+    /// The linker every Database Function instantiates from.
+    pub(crate) fn ctx_linker(&self) -> &Linker<CtxHostState> {
+        &self.ctx_linker
     }
 
     /// The compiled module for `module_wasm`, whose hash is `workload_hash`.
@@ -133,8 +146,23 @@ impl FunctionRuntime {
         input: &[u8],
         limits: &RunLimits,
     ) -> QueryResult<Execution> {
-        let workload_hash = hash(module_wasm);
-        let input_digest = hash(input);
+        self.run_prehashed(&hash(module_wasm), module_wasm, input, None, limits)
+    }
+
+    /// [`run`](Self::run) with the module's hash already known (a planner hashes
+    /// each module once per query, not once per shard) and, when the caller has
+    /// it, the input's digest too (a pinned snapshot carries its own). The
+    /// attestation is identical: these are the same values `run` computes.
+    pub fn run_prehashed(
+        &self,
+        workload_hash: &[u8; 32],
+        module_wasm: &[u8],
+        input: &[u8],
+        input_digest: Option<[u8; 32]>,
+        limits: &RunLimits,
+    ) -> QueryResult<Execution> {
+        let workload_hash = *workload_hash;
+        let input_digest = input_digest.unwrap_or_else(|| hash(input));
 
         let module = self.module(&workload_hash, module_wasm)?;
 

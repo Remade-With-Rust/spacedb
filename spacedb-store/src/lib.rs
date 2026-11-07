@@ -57,6 +57,8 @@ pub use crypto::{
     open_row, rewrap_dek, seal_row, unwrap_dek, wrap_fresh_dek, CryptoError, KeyProvider,
     StaticKeyProvider, WrappedDek, KEY_LEN, NONCE_LEN,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use crypto::load_or_create_key_file;
 
 pub mod collection;
 pub use collection::Collection;

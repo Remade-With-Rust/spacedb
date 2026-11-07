@@ -51,7 +51,8 @@ impl CrdtStore {
     pub fn save<E: KvEngine>(&self, engine: &E, doc_id: &str, doc: &CrdtDoc) -> CrdtResult<()> {
         let state = Bytes(doc.encode_full());
         let mut w = engine.begin_write(Durability::Immediate)?;
-        self.docs.put(&mut w, &doc_id.to_string(), &state)?;
+        // The id is lent as a `&str`: it encodes exactly as the `String` key.
+        self.docs.put_by(&mut w, doc_id, &state)?;
         w.commit()?;
         Ok(())
     }
@@ -68,7 +69,7 @@ impl CrdtStore {
         let doc = CrdtDoc::new(actor_id);
         let r = engine.begin_read()?;
         // The state is merged straight out of the decrypted row - no copy of it.
-        if let Some(applied) = self.docs.get_with(&r, &doc_id.to_string(), |state| doc.apply_update(state))? {
+        if let Some(applied) = self.docs.get_with_by(&r, doc_id, |state| doc.apply_update(state))? {
             applied?;
         }
         Ok(doc)
@@ -93,6 +94,6 @@ impl CrdtStore {
     /// it neither needs the vault unlocked nor decrypts and decodes the state.
     pub fn contains<E: KvEngine>(&self, engine: &E, doc_id: &str) -> CrdtResult<bool> {
         let r = engine.begin_read()?;
-        Ok(self.docs.contains_key(&r, &doc_id.to_string())?)
+        Ok(self.docs.contains_key_by(&r, doc_id)?)
     }
 }

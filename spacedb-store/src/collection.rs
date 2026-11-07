@@ -22,13 +22,14 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use serde::{de::DeserializeOwned, Serialize};
-use zeroize::Zeroizing;
 
 use crate::codec::{decode_value, decode_value_borrowed, encode_value_into, Bytes, KeyDecode, KeyEncode};
-use crate::compress::{pack_value_in_place, unpack_value, Compression};
+use crate::compress::{pack_value_in_place, unpack_value, unpack_value_into, Compression};
+use aes_gcm::Aes256Gcm;
+
 use crate::crypto::{
-    open_row_in_place, seal_row_in_place, unwrap_dek, wrap_fresh_dek, KeyProvider, RowOpener,
-    WrappedDek, KEY_LEN, NONCE_LEN,
+    cipher_for, open_row_in_place_with, seal_row_in_place_with, unwrap_dek, wrap_fresh_dek,
+    KeyProvider, RowOpener, WrappedDek, NONCE_LEN,
 };
 use crate::engine::{Durability, KvEngine, Readable, WriteTx};
 use crate::error::{StoreError, StoreResult};
@@ -240,11 +241,14 @@ where
         self.schema_version
     }
 
-    /// Fetch the vault key (cold-gated) and unwrap this collection's DEK. Done
-    /// per operation so a mid-session lock takes effect immediately.
-    fn dek(&self) -> StoreResult<Zeroizing<[u8; KEY_LEN]>> {
+    /// Fetch the vault key (cold-gated), unwrap this collection's DEK and lend
+    /// its cipher to `f`. Done per operation, and nothing is kept afterwards, so
+    /// a mid-session lock takes effect immediately and no key material outlives
+    /// the operation that needed it.
+    fn with_cipher<R>(&self, f: impl FnOnce(&Aes256Gcm) -> StoreResult<R>) -> StoreResult<R> {
         let vault_key = self.key_provider.vault_key()?;
-        Ok(unwrap_dek(&vault_key, &self.name, &self.wrapped_dek)?)
+        let dek = unwrap_dek(&vault_key, &self.name, &self.wrapped_dek)?;
+        f(&cipher_for(&dek))
     }
 
     /// The sealed row for `value`: `nonce ‖ AEAD(plaintext)`, where the
@@ -252,7 +256,7 @@ where
     /// `format_byte ‖ payload` (compressing per policy) for prefixed ones. It is
     /// built in one buffer — encoded straight after the nonce slot, packed and
     /// sealed in place — so the value is never copied between stages.
-    fn seal_value(&self, dek: &[u8; KEY_LEN], key_bytes: &[u8], value: &V) -> StoreResult<Vec<u8>> {
+    fn seal_value(&self, cipher: &Aes256Gcm, key_bytes: &[u8], value: &V) -> StoreResult<Vec<u8>> {
         // Room for a typical row up front, so encoding does not grow the buffer
         // 12 -> 24 -> 48 -> ... through a chain of reallocations.
         let mut row = Vec::with_capacity(ROW_CAPACITY_HINT);
@@ -265,7 +269,7 @@ where
                 pack_value_in_place(&mut row, NONCE_LEN, self.compression);
             }
         }
-        seal_row_in_place(dek, &self.name, key_bytes, self.schema_version, &mut row)?;
+        seal_row_in_place_with(cipher, &self.name, key_bytes, self.schema_version, &mut row)?;
         Ok(row)
     }
 
@@ -274,6 +278,15 @@ where
         match self.format {
             ValueFormat::Legacy => decode_value(plain),
             ValueFormat::Prefixed => decode_value(&unpack_value(plain)?),
+        }
+    }
+
+    /// [`value_from_plaintext`](Self::value_from_plaintext) for a scan: a
+    /// compressed row decompresses into `scratch`, reused row after row.
+    fn value_from_plaintext_into(&self, plain: &[u8], scratch: &mut Vec<u8>) -> StoreResult<V> {
+        match self.format {
+            ValueFormat::Legacy => decode_value(plain),
+            ValueFormat::Prefixed => decode_value(unpack_value_into(plain, scratch)?),
         }
     }
 
@@ -286,24 +299,38 @@ where
             Some(bytes) => bytes,
             None => return Ok(None),
         };
-        let dek = self.dek()?;
-        let plain =
-            open_row_in_place(&dek, &self.name, &key_bytes, self.schema_version, &mut sealed)?;
+        let plain = self.with_cipher(|cipher| {
+            open_row_in_place_with(cipher, &self.name, &key_bytes, self.schema_version, &mut sealed)
+                .map_err(StoreError::from)
+        })?;
         Ok(Some(self.value_from_plaintext(&sealed[plain])?))
     }
 
     /// Encrypt and store `value` under `key`.
     pub fn put(&self, tx: &mut impl WriteTx, key: &K, value: &V) -> StoreResult<()> {
+        self.put_by(tx, key, value)
+    }
+
+    /// [`put`](Self::put) with the key in any form that encodes like `K` (see
+    /// [`contains_key_by`](Self::contains_key_by)).
+    pub fn put_by<Q: KeyEncode + ?Sized>(&self, tx: &mut impl WriteTx, key: &Q, value: &V) -> StoreResult<()> {
         let key_bytes = key.encode();
-        let dek = self.dek()?;
-        let sealed = self.seal_value(&dek, &key_bytes, value)?;
+        let sealed = self.with_cipher(|cipher| self.seal_value(cipher, &key_bytes, value))?;
         tx.put_raw_owned(&self.name, key_bytes, sealed)
     }
 
-    /// Whether `key` holds a row. Reads only the engine - no vault key and no
-    /// decryption - since a row's presence is visible to the engine anyway.
+    /// Whether `key` holds a row. Reads only the engine - no vault key, no
+    /// decryption and no copy of the row - since a row's presence is visible to
+    /// the engine anyway.
     pub fn contains_key(&self, tx: &impl Readable, key: &K) -> StoreResult<bool> {
-        Ok(tx.get_raw(&self.name, &key.encode())?.is_some())
+        self.contains_key_by(tx, key)
+    }
+
+    /// [`contains_key`](Self::contains_key) with the key given in any form that
+    /// encodes like `K` (a `&str` for a `String` key, say), so a caller holding
+    /// a borrowed id need not build an owned key to ask.
+    pub fn contains_key_by<Q: KeyEncode + ?Sized>(&self, tx: &impl Readable, key: &Q) -> StoreResult<bool> {
+        tx.contains_raw(&self.name, &key.encode())
     }
 
     /// Remove `key`. Returns `true` if a value was present. No key material is
@@ -315,19 +342,26 @@ where
     /// Decrypt and return the `(key, value)` pairs in `[lo, hi)`, in ascending
     /// logical key order. The DEK is unwrapped once for the whole scan.
     pub fn range(&self, tx: &impl Readable, lo: &K, hi: &K) -> StoreResult<Vec<(K, V)>> {
-        let raw = tx.range_raw(&self.name, &lo.encode(), &hi.encode())?;
-        if raw.is_empty() {
-            return Ok(Vec::new());
-        }
-        let dek = self.dek()?;
-        let mut opener = RowOpener::new(&dek);
-        raw.into_iter()
-            .map(|(key_bytes, mut sealed)| {
-                let plain =
-                    opener.open_in_place(&self.name, &key_bytes, self.schema_version, &mut sealed)?;
-                Ok((K::decode(&key_bytes)?, self.value_from_plaintext(&sealed[plain])?))
-            })
-            .collect()
+        // The engine lends each row: the key is decoded from the borrow, the
+        // sealed value is copied once into a buffer reused for the whole scan
+        // (decryption is in place) and decoded from there. The DEK is unwrapped
+        // on the first row, so an empty range never touches the vault.
+        let mut out = Vec::new();
+        let mut opener: Option<RowOpener> = None;
+        let mut row: Vec<u8> = Vec::new();
+        let mut scratch: Vec<u8> = Vec::new();
+        tx.range_with(&self.name, &lo.encode(), &hi.encode(), &mut |key_bytes, sealed| {
+            let opener = match &mut opener {
+                Some(o) => o,
+                None => opener.insert(self.with_cipher(|c| Ok(RowOpener::from_cipher(c.clone())))?),
+            };
+            row.clear();
+            row.extend_from_slice(sealed);
+            let plain = opener.open_in_place(&self.name, key_bytes, self.schema_version, &mut row)?;
+            out.push((K::decode(key_bytes)?, self.value_from_plaintext_into(&row[plain], &mut scratch)?));
+            Ok(())
+        })?;
+        Ok(out)
     }
 }
 
@@ -341,14 +375,26 @@ impl<K: KeyEncode + KeyDecode> Collection<K, Bytes> {
         key: &K,
         f: impl FnOnce(&[u8]) -> R,
     ) -> StoreResult<Option<R>> {
+        self.get_with_by(tx, key, f)
+    }
+
+    /// [`get_with`](Self::get_with) with the key in any form that encodes like
+    /// `K` (see [`contains_key_by`](Self::contains_key_by)).
+    pub fn get_with_by<Q: KeyEncode + ?Sized, R>(
+        &self,
+        tx: &impl Readable,
+        key: &Q,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> StoreResult<Option<R>> {
         let key_bytes = key.encode();
         let mut sealed = match tx.get_raw(&self.name, &key_bytes)? {
             Some(bytes) => bytes,
             None => return Ok(None),
         };
-        let dek = self.dek()?;
-        let plain =
-            open_row_in_place(&dek, &self.name, &key_bytes, self.schema_version, &mut sealed)?;
+        let plain = self.with_cipher(|cipher| {
+            open_row_in_place_with(cipher, &self.name, &key_bytes, self.schema_version, &mut sealed)
+                .map_err(StoreError::from)
+        })?;
         let plain = &sealed[plain];
         let encoded = match self.format {
             ValueFormat::Legacy => Cow::Borrowed(plain),

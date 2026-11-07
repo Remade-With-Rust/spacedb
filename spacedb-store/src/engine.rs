@@ -24,6 +24,9 @@
 
 use crate::error::StoreResult;
 
+/// The visitor a lending range scan calls with each `(key, value)` row.
+pub type RowVisitor<'a> = dyn FnMut(&[u8], &[u8]) -> StoreResult<()> + 'a;
+
 /// Durability for a write transaction. Chosen **per write** because the mission's
 /// consistency tiers want different guarantees: ledger-grade / strong-tier
 /// collections fsync every commit; explicitly-convergent caches may not.
@@ -45,11 +48,34 @@ pub trait Readable {
     /// Fetch the raw value bytes for `key` in `table`, or `None` if absent.
     fn get_raw(&self, table: &str, key: &[u8]) -> StoreResult<Option<Vec<u8>>>;
 
+    /// Whether `key` holds a value in `table`. The default fetches the value and
+    /// drops it; an engine that can answer without copying the row should.
+    fn contains_raw(&self, table: &str, key: &[u8]) -> StoreResult<bool> {
+        Ok(self.get_raw(table, key)?.is_some())
+    }
+
     /// Return `(key, value)` byte pairs in the **half-open** range `[lo, hi)`,
     /// in ascending key (byte-lexicographic) order. Because keys are written in
     /// the order-preserving encoding (see [`crate::codec`]), this is logical
     /// key order.
     fn range_raw(&self, table: &str, lo: &[u8], hi: &[u8]) -> StoreResult<Vec<(Vec<u8>, Vec<u8>)>>;
+
+    /// Visit the `(key, value)` byte pairs in `[lo, hi)`, in ascending key order,
+    /// lending each row to `f` instead of copying it out. The default walks
+    /// [`range_raw`](Self::range_raw); an engine that holds the rows answers
+    /// without the copies. `f` returning an error stops the walk.
+    fn range_with(
+        &self,
+        table: &str,
+        lo: &[u8],
+        hi: &[u8],
+        f: &mut RowVisitor<'_>,
+    ) -> StoreResult<()> {
+        for (k, v) in self.range_raw(table, lo, hi)? {
+            f(&k, &v)?;
+        }
+        Ok(())
+    }
 }
 
 /// A read-only transaction: a consistent snapshot for its lifetime.

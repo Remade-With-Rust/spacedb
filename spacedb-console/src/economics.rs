@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use spacedb_meter::Resource;
 
+use crate::intern::Interner;
 use crate::observe::{AgentBudgetObs, SettledObs};
 
 /// Revenue split across the three rails.
@@ -48,11 +49,13 @@ pub fn rollup_economics(
 ) -> Economics {
     let mut revenue = 0u64;
     let mut per_rail = RailBreakdown::default();
-    let mut spend_by_customer: BTreeMap<String, u64> = BTreeMap::new();
+    // Customers repeat across thousands of receipts: tally per interned name,
+    // build the ordered map once at the end (see `intern`).
+    let mut customers: Interner<u64> = Interner::new();
 
     for r in settled {
         revenue += r.micro_mata;
-        *spend_by_customer.entry(r.settles_to_did.clone()).or_default() += r.micro_mata;
+        *customers.slot(&r.settles_to_did) += r.micro_mata;
         match r.resource {
             Resource::Storage => per_rail.storage += r.micro_mata,
             Resource::Compute => per_rail.compute += r.micro_mata,
@@ -83,7 +86,7 @@ pub fn rollup_economics(
 
     Economics {
         revenue_micro_mata: revenue,
-        spend_by_customer,
+        spend_by_customer: customers.into_map(),
         per_rail,
         budgets,
         unsettled_claims,

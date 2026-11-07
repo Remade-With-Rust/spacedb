@@ -6,8 +6,8 @@
 use std::collections::BTreeSet;
 
 use spacedb_query::{
-    run_query, CtxRights, FunctionCtx, FunctionRuntime, QueryPlan, RecordSnapshot, RunLimits,
-    Shard, Snapshot,
+    run_query, CtxRights, FunctionCtx, FunctionRuntime, PinnedRecords, QueryPlan, RecordSnapshot,
+    RunLimits, Shard, Snapshot,
 };
 
 const SUM_MAP_WAT: &str = r#"
@@ -130,8 +130,10 @@ fn main() {
         read: true,
         write: true,
     };
+    // Pinned once; the four runs share the records and their hash.
+    let pinned = PinnedRecords::new(snap);
     for _ in 0..4 {
-        let ctx = FunctionCtx::new(snap.clone(), rights, BTreeSet::new());
+        let ctx = FunctionCtx::with_pinned(&pinned, rights, BTreeSet::new());
         let o = rt
             .run_with_ctx(&host, b"in", &RunLimits::default(), ctx)
             .unwrap();

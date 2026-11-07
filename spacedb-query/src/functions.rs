@@ -40,9 +40,11 @@
 //! the run** — the write-set is discarded with it (all-or-nothing).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use wasmtime::{
-    Caller, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc,
+    Caller, Engine, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
+    TypedFunc,
 };
 
 use crate::corroborate::FunctionRun;
@@ -53,6 +55,36 @@ use crate::runtime::{Execution, FunctionRuntime, RunLimits};
 /// one frontier. `BTreeMap` so iteration (and every digest over it) is
 /// deterministic on every host.
 pub type RecordSnapshot = BTreeMap<(String, String), Vec<u8>>;
+
+/// A [`RecordSnapshot`] shared between the functions that run over it, with its
+/// content hash taken once. Every [`FunctionCtx`] built from it holds the same
+/// records (no clone per run) and the same hash (no re-hash per run).
+#[derive(Clone, Debug)]
+pub struct PinnedRecords {
+    records: Arc<RecordSnapshot>,
+    hash: [u8; 32],
+}
+
+impl PinnedRecords {
+    /// Pin `records`, hashing them once.
+    pub fn new(records: RecordSnapshot) -> Self {
+        let hash = hash_records(&records);
+        Self {
+            records: Arc::new(records),
+            hash,
+        }
+    }
+
+    /// The records.
+    pub fn records(&self) -> &RecordSnapshot {
+        &self.records
+    }
+
+    /// Content hash of the records (what [`FunctionCtx::snapshot_hash`] reports).
+    pub fn hash(&self) -> [u8; 32] {
+        self.hash
+    }
+}
 
 /// What the invoking capability lets the function do — checked on **every** host
 /// call. A function has exactly the caller's rights, never more.
@@ -68,7 +100,7 @@ pub struct CtxRights {
 /// cannot compute on — serving it to server-side code would break that promise).
 #[derive(Debug)]
 pub struct FunctionCtx {
-    snapshot: RecordSnapshot,
+    snapshot: Arc<RecordSnapshot>,
     snapshot_hash: [u8; 32],
     /// This run's buffered mutations: `Some(value)` = put, `None` = tombstone.
     /// Overlaid on the snapshot for read-your-writes; applied by the caller only
@@ -83,10 +115,15 @@ pub struct FunctionCtx {
 
 impl FunctionCtx {
     pub fn new(snapshot: RecordSnapshot, rights: CtxRights, denied: BTreeSet<String>) -> Self {
-        let snapshot_hash = hash_records(&snapshot);
+        Self::with_pinned(&PinnedRecords::new(snapshot), rights, denied)
+    }
+
+    /// A context over an already-pinned snapshot: the records are shared, not
+    /// copied, and their hash is reused.
+    pub fn with_pinned(pinned: &PinnedRecords, rights: CtxRights, denied: BTreeSet<String>) -> Self {
         Self {
-            snapshot,
-            snapshot_hash,
+            snapshot: Arc::clone(&pinned.records),
+            snapshot_hash: pinned.hash,
             overlay: BTreeMap::new(),
             rights,
             denied,
@@ -246,7 +283,7 @@ pub struct FunctionOutcome {
     pub ctx: FunctionCtx,
 }
 
-struct CtxHostState {
+pub(crate) struct CtxHostState {
     limits: StoreLimits,
     ctx: FunctionCtx,
     /// The guest's `memory` and `alloc`, resolved once after instantiation so a
@@ -319,74 +356,10 @@ impl FunctionRuntime {
         store.limiter(|h| &mut h.limits);
         store.set_fuel(limits.max_fuel).map_err(|e| QueryError::Fuel(e.to_string()))?;
 
-        let mut linker: Linker<CtxHostState> = Linker::new(self.engine());
-        linker
-            .func_wrap(
-                "spacedb",
-                "host_call",
-                |mut caller: Caller<'_, CtxHostState>,
-                 op_ptr: i32,
-                 op_len: i32,
-                 pay_ptr: i32,
-                 pay_len: i32|
-                 -> wasmtime::Result<i64> {
-                    let memory = match caller.data().memory {
-                        Some(memory) => memory,
-                        None => caller
-                            .get_export("memory")
-                            .and_then(|e| e.into_memory())
-                            .ok_or_else(|| wasmtime::Error::msg("host_call: no guest memory"))?,
-                    };
-
-                    // 1. Borrow op + payload straight out of guest memory and
-                    // 2. dispatch — pure over (snapshot, overlay, op, payload).
-                    // `data_and_store_mut` hands out the guest's bytes and the
-                    // host state together (disjoint borrows), so neither the op
-                    // nor the payload is copied out first.
-                    let resp = {
-                        let (data, state) = memory.data_and_store_mut(&mut caller);
-                        let data: &[u8] = data;
-                        let slice = |ptr: i32, len: i32| {
-                            let (ptr, len) = (ptr as usize, len as usize);
-                            data.get(ptr..ptr + len).ok_or_else(|| {
-                                wasmtime::Error::msg("host_call: slice out of bounds")
-                            })
-                        };
-                        let op_bytes = slice(op_ptr, op_len)?;
-                        let payload = slice(pay_ptr, pay_len)?;
-                        let op = std::str::from_utf8(op_bytes)
-                            .map_err(|_| wasmtime::Error::msg("host_call: op must be UTF-8"))?;
-                        let mut resp = std::mem::take(&mut state.resp);
-                        state
-                            .ctx
-                            .dispatch(op, payload, &mut resp)
-                            .map_err(wasmtime::Error::msg)?;
-                        resp
-                    };
-
-                    // 3. Hand the response back through the guest's own allocator
-                    //    (a reentrant call — its fuel burns deterministically).
-                    let alloc: TypedFunc<i32, i32> = match caller.data().alloc.clone() {
-                        Some(alloc) => alloc,
-                        None => caller
-                            .get_export("alloc")
-                            .and_then(|e| e.into_func())
-                            .ok_or_else(|| wasmtime::Error::msg("host_call: no guest alloc"))?
-                            .typed(&caller)
-                            .map_err(|e| wasmtime::Error::msg(format!("host_call: alloc: {e}")))?,
-                    };
-                    let len = i32::try_from(resp.len())
-                        .map_err(|_| wasmtime::Error::msg("host_call: response too large"))?;
-                    let ptr = alloc.call(&mut caller, len)?;
-                    memory.write(&mut caller, ptr as usize, &resp)?;
-                    let packed = (((ptr as u32) as i64) << 32) | (resp.len() as u32) as i64;
-                    caller.data_mut().resp = resp; // keep the buffer for the next call
-                    Ok(packed)
-                },
-            )
-            .map_err(|e| QueryError::Instantiate(e.to_string()))?;
-
-        let instance: Instance = linker
+        // The linker was built once with the runtime (`ctx_linker`): a run only
+        // instantiates from it.
+        let instance: Instance = self
+            .ctx_linker()
             .instantiate(&mut store, &module)
             .map_err(|e| QueryError::Instantiate(e.to_string()))?;
 
@@ -434,6 +407,76 @@ impl FunctionRuntime {
             ctx: store.into_data().ctx,
         })
     }
+}
+
+/// The Database-Function linker: exactly one import, `spacedb::host_call`.
+pub(crate) fn ctx_linker(engine: &Engine) -> QueryResult<Linker<CtxHostState>> {
+    let mut linker: Linker<CtxHostState> = Linker::new(engine);
+    linker
+        .func_wrap("spacedb", "host_call", host_call)
+        .map_err(|e| QueryError::Instantiate(e.to_string()))?;
+    Ok(linker)
+}
+
+/// `spacedb::host_call(op_ptr, op_len, payload_ptr, payload_len) -> packed response`.
+fn host_call(
+    mut caller: Caller<'_, CtxHostState>,
+    op_ptr: i32,
+    op_len: i32,
+    pay_ptr: i32,
+    pay_len: i32,
+) -> wasmtime::Result<i64> {
+    let memory = match caller.data().memory {
+        Some(memory) => memory,
+        None => caller
+            .get_export("memory")
+            .and_then(|e| e.into_memory())
+            .ok_or_else(|| wasmtime::Error::msg("host_call: no guest memory"))?,
+    };
+
+    // 1. Borrow op + payload straight out of guest memory and
+    // 2. dispatch — pure over (snapshot, overlay, op, payload).
+    // `data_and_store_mut` hands out the guest's bytes and the host state
+    // together (disjoint borrows), so neither the op nor the payload is
+    // copied out first.
+    let resp = {
+        let (data, state) = memory.data_and_store_mut(&mut caller);
+        let data: &[u8] = data;
+        let slice = |ptr: i32, len: i32| {
+            let (ptr, len) = (ptr as usize, len as usize);
+            data.get(ptr..ptr + len)
+                .ok_or_else(|| wasmtime::Error::msg("host_call: slice out of bounds"))
+        };
+        let op_bytes = slice(op_ptr, op_len)?;
+        let payload = slice(pay_ptr, pay_len)?;
+        let op = std::str::from_utf8(op_bytes)
+            .map_err(|_| wasmtime::Error::msg("host_call: op must be UTF-8"))?;
+        let mut resp = std::mem::take(&mut state.resp);
+        state
+            .ctx
+            .dispatch(op, payload, &mut resp)
+            .map_err(wasmtime::Error::msg)?;
+        resp
+    };
+
+    // 3. Hand the response back through the guest's own allocator (a reentrant
+    //    call — its fuel burns deterministically).
+    let alloc: TypedFunc<i32, i32> = match caller.data().alloc.clone() {
+        Some(alloc) => alloc,
+        None => caller
+            .get_export("alloc")
+            .and_then(|e| e.into_func())
+            .ok_or_else(|| wasmtime::Error::msg("host_call: no guest alloc"))?
+            .typed(&caller)
+            .map_err(|e| wasmtime::Error::msg(format!("host_call: alloc: {e}")))?,
+    };
+    let len = i32::try_from(resp.len())
+        .map_err(|_| wasmtime::Error::msg("host_call: response too large"))?;
+    let ptr = alloc.call(&mut caller, len)?;
+    memory.write(&mut caller, ptr as usize, &resp)?;
+    let packed = (((ptr as u32) as i64) << 32) | (resp.len() as u32) as i64;
+    caller.data_mut().resp = resp; // keep the buffer for the next call
+    Ok(packed)
 }
 
 // ── framing helpers ────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::intern::Interner;
 use crate::observe::{AuditObs, CapabilityObs};
 
 /// One agent's recent footprint in the audit log.
@@ -54,14 +55,18 @@ pub fn rollup_access(
         }
     }
 
-    let mut agent_activity: BTreeMap<String, AgentActivity> = BTreeMap::new();
+    // Actors repeat thousands of times over a dozen names: intern each name to
+    // an index once (a hash of the bytes), tally on the index, and build the
+    // ordered map at the end from the names themselves. The per-entry ordered
+    // search and name copy are gone; the map is the same map.
+    let mut actors: Interner<AgentActivity> = Interner::new();
     let mut denied_recent = 0;
     for entry in audit {
         if !entry.allowed {
             denied_recent += 1;
         }
         if entry.is_agent() {
-            let a = agent_activity.entry(entry.actor.clone()).or_default();
+            let a = actors.slot(&entry.actor);
             a.ops += 1;
             if !entry.allowed {
                 a.denied += 1;
@@ -74,7 +79,7 @@ pub fn rollup_access(
         active_agent,
         revoked,
         expiring_soon,
-        agent_activity,
+        agent_activity: actors.into_map(),
         denied_recent,
     }
 }

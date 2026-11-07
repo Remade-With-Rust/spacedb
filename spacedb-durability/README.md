@@ -16,7 +16,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dependencies]
-spacedb-durability = "0.5"
+spacedb-durability = "0.7"
 ```
 
 ## The model

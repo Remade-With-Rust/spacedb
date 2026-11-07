@@ -17,7 +17,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dependencies]
-spacedb-meter = "0.5"
+spacedb-meter = "0.7"
 ```
 
 ## What gets measured
@@ -88,6 +88,14 @@ pub trait Settlement {
 
 Depends on `serde` / `postcard` / `thiserror` only — no `spacedb-*` and no
 `mata-*` crates.
+
+## Performance (0.7.2)
+
+Measured on exact instruction counts (callgrind) with deterministic drivers
+whose outputs did not change; release build, 0.7.1 -> 0.7.2:
+exercised by the console driver (`ir_console` -33.1% overall).
+
+- `UsageClaim` ids are joined into one sized `String` instead of `format!`.
 
 ## Performance (0.7.0)
 

@@ -17,7 +17,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dependencies]
-spacedb-console = "0.5"
+spacedb-console = "0.7"
 ```
 
 ## The four boards
@@ -75,6 +75,15 @@ drive the dashboard from a simulated fleet.
 
 Depends on [`spacedb-meter`](https://github.com/Remade-With-Rust/spacedb/tree/HEAD/spacedb-meter) (for `Resource`) and `serde`.
 No MATA crate.
+
+## Performance (0.7.2)
+
+Measured on exact instruction counts (callgrind) with deterministic drivers
+whose outputs did not change; release build, 0.7.1 -> 0.7.2:
+`ir_console` 68.2M -> 45.6M (**-33.1%**).
+
+- The access rollup interns actor names and builds its ordered map once.
+- The economics rollup interns customer names.
 
 ## Performance (0.7.0)
 

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::engine::{Durability, KvEngine, ReadTx, Readable, WriteTx};
+use crate::engine::{Durability, KvEngine, ReadTx, Readable, RowVisitor, WriteTx};
 use crate::error::{StoreError, StoreResult};
 
 type Table = BTreeMap<Vec<u8>, Vec<u8>>;
@@ -38,12 +38,19 @@ fn poisoned() -> StoreError {
     StoreError::engine("in-memory lock poisoned")
 }
 
-/// Collect the `[lo, hi)` slice of a table into sorted `(key, value)` pairs.
-fn range_table(table: &Table, lo: &[u8], hi: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
-    table
-        .range::<[u8], _>((Bound::Included(lo), Bound::Excluded(hi)))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
+/// `range_raw` on top of `range_with`: one copy per row, taken at the visitor.
+fn collect_range(
+    tx: &impl Readable,
+    table: &str,
+    lo: &[u8],
+    hi: &[u8],
+) -> StoreResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut out = Vec::new();
+    tx.range_with(table, lo, hi, &mut |k, v| {
+        out.push((k.to_vec(), v.to_vec()));
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 // ─── read transaction ────────────────────────────────────────────────────────
@@ -58,12 +65,27 @@ impl Readable for MemReadTx<'_> {
         Ok(self.guard.get(table).and_then(|t| t.get(key).cloned()))
     }
 
+    fn contains_raw(&self, table: &str, key: &[u8]) -> StoreResult<bool> {
+        Ok(self.guard.get(table).is_some_and(|t| t.contains_key(key)))
+    }
+
     fn range_raw(&self, table: &str, lo: &[u8], hi: &[u8]) -> StoreResult<Vec<(Vec<u8>, Vec<u8>)>> {
-        Ok(self
-            .guard
-            .get(table)
-            .map(|t| range_table(t, lo, hi))
-            .unwrap_or_default())
+        collect_range(self, table, lo, hi)
+    }
+
+    fn range_with(
+        &self,
+        table: &str,
+        lo: &[u8],
+        hi: &[u8],
+        f: &mut RowVisitor<'_>,
+    ) -> StoreResult<()> {
+        if let Some(t) = self.guard.get(table) {
+            for (k, v) in t.range::<[u8], _>((Bound::Included(lo), Bound::Excluded(hi))) {
+                f(k, v)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -82,6 +104,19 @@ pub struct MemWriteTx<'a> {
     _durability: Durability,
 }
 
+impl MemWriteTx<'_> {
+    /// This transaction's edits to `table`, created on the first edit. The
+    /// name is borrowed for the lookup: `entry(table.to_string())` copied it
+    /// onto the heap for every single put and delete, to be freed again at
+    /// once on every hit.
+    fn overlay_table(&mut self, table: &str) -> &mut BTreeMap<Vec<u8>, Option<Vec<u8>>> {
+        if !self.overlay.contains_key(table) {
+            self.overlay.insert(table.to_string(), BTreeMap::new());
+        }
+        self.overlay.get_mut(table).expect("present or just inserted")
+    }
+}
+
 impl Readable for MemWriteTx<'_> {
     fn get_raw(&self, table: &str, key: &[u8]) -> StoreResult<Option<Vec<u8>>> {
         // Read-your-own-writes: the overlay shadows the base map.
@@ -93,11 +128,31 @@ impl Readable for MemWriteTx<'_> {
         Ok(self.base.get(table).and_then(|t| t.get(key).cloned()))
     }
 
+    fn contains_raw(&self, table: &str, key: &[u8]) -> StoreResult<bool> {
+        if let Some(t) = self.overlay.get(table) {
+            if let Some(slot) = t.get(key) {
+                return Ok(slot.is_some());
+            }
+        }
+        Ok(self.base.get(table).is_some_and(|t| t.contains_key(key)))
+    }
+
     fn range_raw(&self, table: &str, lo: &[u8], hi: &[u8]) -> StoreResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        collect_range(self, table, lo, hi)
+    }
+
+    fn range_with(
+        &self,
+        table: &str,
+        lo: &[u8],
+        hi: &[u8],
+        f: &mut RowVisitor<'_>,
+    ) -> StoreResult<()> {
         // The base slice with this txn's overlay edits applied, so a range scan
         // also sees uncommitted writes. Both sides are sorted by key, so one
-        // merge pass yields the result in order and copies each surviving row
-        // once (it used to be copied into a temporary map and out again).
+        // merge pass yields the rows in order; each surviving row is lent to
+        // the visitor in place (it used to be copied out, and before that
+        // copied into a temporary map and out again).
         let bounds = (Bound::Included(lo), Bound::Excluded(hi));
         let mut base = self
             .base
@@ -111,7 +166,6 @@ impl Readable for MemWriteTx<'_> {
             .into_iter()
             .flat_map(|t| t.range::<[u8], _>(bounds))
             .peekable();
-        let mut out = Vec::new();
         loop {
             let take_edit = match (base.peek(), edits.peek()) {
                 (None, None) => break,
@@ -131,23 +185,20 @@ impl Readable for MemWriteTx<'_> {
             if take_edit {
                 let (k, slot) = edits.next().expect("peeked");
                 if let Some(v) = slot {
-                    out.push((k.clone(), v.clone()));
+                    f(k, v)?;
                 }
             } else {
                 let (k, v) = base.next().expect("peeked");
-                out.push((k.clone(), v.clone()));
+                f(k, v)?;
             }
         }
-        Ok(out)
+        Ok(())
     }
 }
 
 impl WriteTx for MemWriteTx<'_> {
     fn put_raw(&mut self, table: &str, key: &[u8], val: &[u8]) -> StoreResult<()> {
-        self.overlay
-            .entry(table.to_string())
-            .or_default()
-            .insert(key.to_vec(), Some(val.to_vec()));
+        self.overlay_table(table).insert(key.to_vec(), Some(val.to_vec()));
         Ok(())
     }
 
@@ -156,19 +207,14 @@ impl WriteTx for MemWriteTx<'_> {
         // keeps no more memory than the copy `put_raw` would have made
         // (shrinking is an in-place realloc, not a copy).
         val.shrink_to_fit();
-        self.overlay
-            .entry(table.to_string())
-            .or_default()
-            .insert(key, Some(val));
+        self.overlay_table(table).insert(key, Some(val));
         Ok(())
     }
 
     fn delete_raw(&mut self, table: &str, key: &[u8]) -> StoreResult<bool> {
-        let existed = self.get_raw(table, key)?.is_some();
-        self.overlay
-            .entry(table.to_string())
-            .or_default()
-            .insert(key.to_vec(), None);
+        // Presence only: the old value is not copied to learn that it was there.
+        let existed = self.contains_raw(table, key)?;
+        self.overlay_table(table).insert(key.to_vec(), None);
         Ok(existed)
     }
 

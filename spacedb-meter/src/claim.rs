@@ -28,6 +28,23 @@ pub struct UsageClaim {
     pub proof: Option<ProofRef>,
 }
 
+/// Append `n` in decimal, as `Display` would print it.
+fn push_decimal(out: &mut String, mut n: u64) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for &d in &digits[at..] {
+        out.push(d as char);
+    }
+}
+
 impl UsageClaim {
     pub const VERSION: u16 = 1;
 
@@ -40,10 +57,19 @@ impl UsageClaim {
     ) -> Self {
         let node_did = node_did.into();
         let settles_to_did = settles_to_did.into();
-        let claim_id = format!(
-            "{node_did}:{settles_to_did}:{}:{period_end}",
-            usage.resource().tag()
-        );
+        // `node:settles_to:class:period_end`, joined into one exactly-sized
+        // String: the same bytes `format!` produced, without the formatting
+        // machinery (a few hundred instructions per piece) on every claim.
+        let tag = usage.resource().tag();
+        let mut claim_id =
+            String::with_capacity(node_did.len() + settles_to_did.len() + tag.len() + 3 + 20);
+        claim_id.push_str(&node_did);
+        claim_id.push(':');
+        claim_id.push_str(&settles_to_did);
+        claim_id.push(':');
+        claim_id.push_str(tag);
+        claim_id.push(':');
+        push_decimal(&mut claim_id, period_end);
         Self {
             version: Self::VERSION,
             claim_id,
@@ -72,5 +98,18 @@ impl UsageClaim {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, MeterError> {
         postcard::from_bytes(bytes).map_err(|e| MeterError::Codec(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod claim_id_tests {
+    use super::*;
+
+    #[test]
+    fn claim_id_matches_the_formatted_form() {
+        for (node, cust, end) in [("n", "c", 0u64), ("home-007", "customer-3", 1_700_000_060), ("a:b", "", u64::MAX)] {
+            let claim = UsageClaim::new(node, cust, Usage::compute(5, 1), 0, end);
+            assert_eq!(claim.claim_id, format!("{node}:{cust}:compute:{end}"));
+        }
     }
 }

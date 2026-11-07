@@ -16,7 +16,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dependencies]
-spacedb-store = "0.5"
+spacedb-store = "0.7"
 ```
 
 ## The model
@@ -78,6 +78,19 @@ raw bytes.
 Depends on **no** MATA crate. MATA-specific capability (vault key, identity,
 mesh replication, settlement) enters only through seams this crate defines. The
 dependency arrow is MATA → SpaceDB, never the reverse.
+
+## Performance (0.7.2)
+
+Measured on exact instruction counts (callgrind) with deterministic drivers
+whose outputs did not change; release build, 0.7.1 -> 0.7.2:
+`ir_store` 194.1M -> 191.2M (-1.5%), `ir_redb` 335.0M -> 330.4M (-1.4%), `ir_txrange` 11.6M -> 7.4M (**-36.1%**).
+
+- `Readable::range_with` lends each row to a visitor instead of collecting copies; `Table::range` and `Collection::range` use it, and a collection scan reuses one row buffer and one decompression buffer.
+- `Readable::contains_raw`: presence checks (`contains_key`, `delete_raw`) no longer copy the row.
+- `Collection::put_by` / `contains_key_by` / `get_with_by` take a borrowed key (`&str` for a `String` key).
+- redb read and write transactions open each table once, on first use, instead of once per row; the write side holds its tables with `self_cell`, no unsafe code of ours. The transaction types stay `Send` and `Sync`.
+- The in-memory engine's overlay borrows the table name on put and delete.
+- Rows are compressed without zstd's content checksum (the AEAD tag already authenticates them); checksummed rows from earlier versions still read.
 
 ## Performance (0.7.0)
 

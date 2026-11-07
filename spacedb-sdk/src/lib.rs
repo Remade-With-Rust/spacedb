@@ -70,6 +70,7 @@ pub const fn secure_allocator_enabled() -> bool {
     cfg!(feature = "secure")
 }
 
+mod names;
 mod schema;
 pub use schema::{CrdtType, FieldSpec, Schema};
 

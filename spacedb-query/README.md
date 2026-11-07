@@ -19,7 +19,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dependencies]
-spacedb-query = "0.5"
+spacedb-query = "0.7"
 ```
 
 ## Run a function next to the data
@@ -111,6 +111,16 @@ to complete.
 
 Built on `wasmtime` directly — the same engine MATA's `maestro-fn-runtime`
 wraps — with no MATA dependency.
+
+## Performance (0.7.2)
+
+Measured on exact instruction counts (callgrind) with deterministic drivers
+whose outputs did not change; release build, 0.7.1 -> 0.7.2:
+`ir_query` 33.4M -> 27.4M (**-18.0%**).
+
+- `PinnedRecords` shares a snapshot and its hash across runs (`FunctionCtx::with_pinned`).
+- A query hashes each module once and reuses the snapshot's digest (`FunctionRuntime::run_prehashed`).
+- The Database-Function linker is built once per runtime.
 
 ## Performance (0.7.0)
 

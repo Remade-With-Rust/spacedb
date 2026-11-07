@@ -17,6 +17,7 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::error::{VectorError, VectorResult};
 
@@ -84,7 +85,27 @@ pub struct VectorIndex {
     entries: Vec<Entry>,
     /// Where each id sits in `entries`, so an insert finds an existing id
     /// without comparing it against every stored id (a bulk load was O(n^2)).
-    positions: HashMap<String, usize>,
+    /// Hashed with FNV-1a: ids are the index owner's own names, not an
+    /// attacker's keys, and SipHash on every insert was 5% of a bulk load.
+    positions: HashMap<String, usize, BuildHasherDefault<IdHasher>>,
+}
+
+/// FNV-1a over an id's bytes.
+#[derive(Default)]
+struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = if self.0 == 0 { 0xcbf2_9ce4_8422_2325 } else { self.0 };
+        for &b in bytes {
+            h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = h;
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 impl VectorIndex {
@@ -94,7 +115,7 @@ impl VectorIndex {
             dim,
             metric,
             entries: Vec::new(),
-            positions: HashMap::new(),
+            positions: HashMap::default(),
         }
     }
 
@@ -190,7 +211,35 @@ impl VectorIndex {
     }
 }
 
+/// Lanes of the fixed-width partial sums below. A serial f32 sum is a
+/// dependency chain the compiler may not reassociate, so it runs one
+/// multiply-add per element; eight independent accumulators, combined in a
+/// fixed order, let it vectorize. The split is a constant, not the machine's
+/// vector width, so every host computes the same bits.
+const LANES: usize = 8;
+
+/// `acc` folded in a fixed tree order, then the scalar tail.
+#[inline]
+fn fold(acc: [f32; LANES], tail: f32) -> f32 {
+    ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7])) + tail
+}
+
 fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0f32; LANES];
+    let (ca, ra) = a.as_chunks::<LANES>();
+    let (cb, rb) = b.as_chunks::<LANES>();
+    for (x, y) in ca.iter().zip(cb) {
+        for l in 0..LANES {
+            acc[l] += x[l] * y[l];
+        }
+    }
+    let tail = ra.iter().zip(rb).fold(0f32, |s, (x, y)| s + x * y);
+    fold(acc, tail)
+}
+
+/// The one-multiply-add-per-element form `dot` replaced; the test oracle.
+#[cfg(test)]
+fn dot_serial(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
@@ -199,12 +248,90 @@ fn norm(a: &[f32]) -> f32 {
 }
 
 fn l2(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| {
-            let d = x - y;
-            d * d
-        })
-        .sum::<f32>()
-        .sqrt()
+    let mut acc = [0f32; LANES];
+    let (ca, ra) = a.as_chunks::<LANES>();
+    let (cb, rb) = b.as_chunks::<LANES>();
+    for (x, y) in ca.iter().zip(cb) {
+        for l in 0..LANES {
+            let d = x[l] - y[l];
+            acc[l] += d * d;
+        }
+    }
+    let tail = ra.iter().zip(rb).fold(0f32, |s, (x, y)| {
+        let d = x - y;
+        s + d * d
+    });
+    fold(acc, tail).sqrt()
+}
+
+#[cfg(test)]
+mod accumulator_tests {
+    use super::*;
+
+    fn vectors(n: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {
+        let mut s = seed | 1;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            ((s >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+        };
+        (0..n).map(|_| (0..dim).map(|_| next()).collect()).collect()
+    }
+
+    #[test]
+    fn dot_matches_serial_within_tolerance_at_every_tail() {
+        for dim in [1, 7, 8, 9, 15, 16, 64, 65, 100] {
+            let vs = vectors(2, dim, dim as u64);
+            let (a, b) = (&vs[0], &vs[1]);
+            let fast = dot(a, b);
+            let slow = dot_serial(a, b);
+            let scale = slow.abs().max(1e-3);
+            assert!((fast - slow).abs() / scale < 1e-4, "dim {dim}: {fast} vs {slow}");
+        }
+    }
+
+    #[test]
+    fn top_k_sets_agree_with_serial_scoring() {
+        // The ranking an index returns under each metric must pick the same
+        // ids as serial scoring would, bar exact near-ties (none in this data).
+        let dim = 64;
+        let corpus = vectors(500, dim, 3);
+        let queries = vectors(5, dim, 11);
+        for metric in [Metric::Cosine, Metric::Dot, Metric::Euclidean] {
+            let mut index = VectorIndex::new(dim, metric);
+            for (i, v) in corpus.iter().enumerate() {
+                index.insert(format!("v{i}"), v.clone()).unwrap();
+            }
+            for q in &queries {
+                let fast: Vec<String> = index.search(q, 10).unwrap().into_iter().map(|m| m.id).collect();
+                let mut slow: Vec<(f32, usize)> = corpus
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let s = match metric {
+                            Metric::Cosine => {
+                                dot_serial(q, v) / (dot_serial(q, q).sqrt() * dot_serial(v, v).sqrt())
+                            }
+                            Metric::Dot => dot_serial(q, v),
+                            Metric::Euclidean => -q
+                                .iter()
+                                .zip(v)
+                                .map(|(x, y)| (x - y) * (x - y))
+                                .sum::<f32>()
+                                .sqrt(),
+                        };
+                        (s, i)
+                    })
+                    .collect();
+                slow.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                let slow: Vec<String> = slow.iter().take(10).map(|(_, i)| format!("v{i}")).collect();
+                let mut fs = fast.clone();
+                let mut ss = slow.clone();
+                fs.sort();
+                ss.sort();
+                assert_eq!(fs, ss, "{metric:?}");
+            }
+        }
+    }
 }

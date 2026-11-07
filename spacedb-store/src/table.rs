@@ -65,9 +65,13 @@ where
     /// Return the decoded `(key, value)` pairs in the **half-open** range
     /// `[lo, hi)`, in ascending logical key order.
     pub fn range(&self, tx: &impl Readable, lo: &K, hi: &K) -> StoreResult<Vec<(K, V)>> {
-        let raw = tx.range_raw(&self.name, &lo.encode(), &hi.encode())?;
-        raw.into_iter()
-            .map(|(k, v)| Ok((K::decode(&k)?, decode_value(&v)?)))
-            .collect()
+        // Rows are lent by the engine and decoded in place: no copy of a key or
+        // a value is made on the way to the typed result.
+        let mut out = Vec::new();
+        tx.range_with(&self.name, &lo.encode(), &hi.encode(), &mut |k, v| {
+            out.push((K::decode(k)?, decode_value(v)?));
+            Ok(())
+        })?;
+        Ok(out)
     }
 }

@@ -20,7 +20,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dev-dependencies]
-spacedb-sim = "0.5"
+spacedb-sim = "0.7"
 ```
 
 ## Convergence under a hostile network
@@ -78,6 +78,14 @@ machine. That is the whole value: a failure you can replay.
 
 This is a twin of the **database** — open-core, no maestro / Iron Bank. The full
 economic twin is a separate, proprietary system.
+
+## Performance (0.7.2)
+
+Measured on exact instruction counts (callgrind) with deterministic drivers
+whose outputs did not change; release build, 0.7.1 -> 0.7.2:
+`ir_sim` 1,665.1M -> 1,635.1M (-1.8%).
+
+- No code change here: the gain is `spacedb-crdt`'s cheaper transactions.
 
 ## Performance (0.7.0)
 

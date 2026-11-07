@@ -39,15 +39,15 @@
 
 use std::borrow::Cow;
 use std::fmt::{self, Write as _};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{de::DeserializeOwned, Serialize};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, Array, Doc, GetString, Map, MapRef, Out, ReadTxn, StateVector, Subscription, Text,
-    Transact, Update, WriteTxn,
+    Any, Array, Doc, GetString, Map, MapRef, Out, ReadTxn, StateVector, Text, Transact,
+    TransactionMut, Update, WriteTxn,
 };
 
 use crate::error::{CrdtError, CrdtResult};
@@ -110,6 +110,52 @@ impl<const N: usize> fmt::Write for StackStr<N> {
     }
 }
 
+impl<const N: usize> StackStr<N> {
+    /// Append the decimal form of `v`, the way `write!("{v}")` would, without
+    /// the formatter: a `Display` round trip through `fmt::write` and
+    /// `pad_integral` was a third of every counter increment's self cost.
+    #[inline]
+    fn push_i64(&mut self, v: i64) -> fmt::Result {
+        if v < 0 {
+            self.write_char('-')?;
+        }
+        self.push_u64(v.unsigned_abs())
+    }
+
+    #[inline]
+    fn push_u64(&mut self, mut v: u64) -> fmt::Result {
+        let mut digits = [0u8; 20];
+        let mut at = digits.len();
+        loop {
+            at -= 1;
+            digits[at] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        let text = &digits[at..];
+        if self.len + text.len() > N {
+            return Err(fmt::Error);
+        }
+        self.buf[self.len..self.len + text.len()].copy_from_slice(text);
+        self.len += text.len();
+        Ok(())
+    }
+
+    /// `write_str` for the three one-byte separators and the field name: the
+    /// same bytes `write!` produces, by direct copy.
+    #[inline]
+    fn push_counter_key(&mut self, field: &str, actor: u64) -> fmt::Result {
+        self.write_char(SEP)?;
+        self.write_char('c')?;
+        self.write_char(SEP)?;
+        self.write_str(field)?;
+        self.write_char(SEP)?;
+        self.push_u64(actor)
+    }
+}
+
 /// A derived root/key name (`text<SEP>field`, ...), formatted on the stack when
 /// it fits - it is only ever looked up by `&str` - and on the heap when not.
 enum Name {
@@ -140,8 +186,8 @@ pub struct CrdtDoc {
     doc: Doc,
     fields: MapRef,
     actor: u64,
-    /// Bumped on every mutating transaction (local or remote-applied) by the
-    /// update observer below — the basis for reactive queries.
+    /// Bumped on every mutating transaction (local or remote-applied) by
+    /// [`finish`](Self::finish) — the basis for reactive queries.
     revision: Arc<AtomicU64>,
     /// The raw v1 update bytes of every **local** mutation, buffered for broadcast.
     /// Shipping these verbatim (rather than re-encoding a delta or a snapshot) is the
@@ -149,17 +195,39 @@ pub struct CrdtDoc {
     /// exactly once on every peer, so there is no partial-overlap re-merge that the
     /// underlying engine mishandles for some actor-id orderings. Drained by
     /// [`CrdtDoc::take_local_updates`].
-    pending: Arc<Mutex<Vec<Vec<u8>>>>,
-    /// True only while [`CrdtDoc::apply_update`] is integrating a *remote* update, so
-    /// the observer can tell remote applies (don't re-buffer them) from local writes.
-    applying_remote: Arc<AtomicBool>,
-    /// Keeps the revision-bumping observer registered for the doc's lifetime.
-    _update_sub: Subscription,
+    pending: Mutex<Vec<Vec<u8>>>,
+    /// Whether local mutations are buffered into `pending` at all (see
+    /// [`new_unlogged`](Self::new_unlogged)).
+    log_local_updates: bool,
     /// The last [`state_vector`](Self::state_vector) encoding and the revision
     /// it was taken at: the vector only changes when the document does, and
     /// every change bumps the revision.
     sv_cache: Mutex<Option<(u64, Vec<u8>)>>,
+    /// Recent [`counter`](Self::counter) totals as `(revision, field, total)`:
+    /// a total only changes when the document does, and every change bumps the
+    /// revision, so a hit skips the walk over every key and the parse of every
+    /// subtotal. A few slots cover the fields a caller polls between writes.
+    counter_memo: Mutex<Vec<(u64, String, i64)>>,
+    /// The members of the last OR-Set field queried by
+    /// [`set_contains`](Self::set_contains), as `(revision, field, members)`:
+    /// rebuilt when the document changes, so repeated membership tests are a
+    /// hash lookup instead of a string compare against every element.
+    set_memo: Mutex<Option<(u64, String, std::collections::HashSet<String>)>>,
+    /// The last delta [`encode_update_since`](Self::encode_update_since)
+    /// produced, as `(revision, peer state vector, update)`. A delta is a pure
+    /// function of the document's state and the peer's vector: while neither
+    /// moves, the same bytes come back from here instead of a walk over every
+    /// block of the store (the delete set is re-derived from all of them on
+    /// each encode). Anti-entropy rounds between converged replicas ask the
+    /// same question again and again.
+    delta_memo: Mutex<Option<(u64, Vec<u8>, Vec<u8>)>>,
 }
+
+/// Deltas longer than this are not remembered (one buffer per document).
+const DELTA_MEMO_MAX: usize = 256 * 1024;
+
+/// How many counter fields the read memo remembers.
+const COUNTER_MEMO_SLOTS: usize = 4;
 
 impl CrdtDoc {
     /// Create a document for the replica identified by `actor_id` (the yrs client
@@ -207,43 +275,57 @@ impl CrdtDoc {
         // one-time creation isn't counted as a content change.
         let fields = doc.transact_mut().get_or_insert_map(FIELDS_MAP);
 
-        let revision = Arc::new(AtomicU64::new(0));
-        let pending = Arc::new(Mutex::new(Vec::new()));
-        let applying_remote = Arc::new(AtomicBool::new(false));
-        let revision_for_obs = Arc::clone(&revision);
-        let pending_for_obs = Arc::clone(&pending);
-        let remote_for_obs = Arc::clone(&applying_remote);
-        // Subscribed to transaction *cleanup*, not to `update_v1`: while an
-        // `update_v1` subscriber exists, yrs encodes every committed
-        // transaction for it - including every remote apply and every full
-        // load, whose encoding was thrown away here (they are already in the
-        // log they came from). Cleanup fires at the same point of the commit,
-        // just before the update event, with the same "anything changed" test,
-        // and `encode_update_v1` is exactly what yrs would have encoded - so
-        // the buffered bytes are unchanged and only local mutations pay.
-        let update_sub = doc
-            .observe_transaction_cleanup(move |txn, event| {
-                if event.delete_set.is_empty() && event.after_state == event.before_state {
-                    return;
-                }
-                revision_for_obs.fetch_add(1, Ordering::Relaxed);
-                // Buffer this update for broadcast only if it's a local mutation; a
-                // remote apply (flag set) is already in the log we pulled it from.
-                if log_local_updates && !remote_for_obs.load(Ordering::Relaxed) {
-                    pending_for_obs.lock().unwrap().push(txn.encode_update_v1());
-                }
-            })
-            .expect("no transaction is active during construction");
-
+        // No yrs observer. Every transaction on this document is opened by a
+        // method of this type, and each of them ends in `finish`, which does
+        // what the transaction-cleanup observer used to: the "anything
+        // changed" test, the revision bump and, for a logged document, the
+        // raw-update encoding of a local mutation. The observer cost every
+        // commit a cloned before-state, after-state and delete set (for the
+        // event it was handed) plus an atomic flag to tell local from remote;
+        // here the transaction is read in place and locality is known at the
+        // call site.
         Self {
             doc,
             fields,
             actor: actor_id,
-            revision,
-            pending,
-            applying_remote,
-            _update_sub: update_sub,
+            revision: Arc::new(AtomicU64::new(0)),
+            pending: Mutex::new(Vec::new()),
+            log_local_updates,
             sv_cache: Mutex::new(None),
+            counter_memo: Mutex::new(Vec::new()),
+            set_memo: Mutex::new(None),
+            delta_memo: Mutex::new(None),
+        }
+    }
+
+    /// Commit `txn` and account for it: a transaction that changed nothing
+    /// (no block integrated, nothing deleted) leaves the document as it was;
+    /// one that did bumps the revision and, when it was a `local` mutation on
+    /// a logged document, buffers its raw update for broadcast. A remote apply
+    /// is already in the log it came from. `encode_update_v1` after the commit
+    /// is byte-for-byte what yrs itself would have encoded for an update
+    /// observer: the same store, after the same block squashing.
+    fn finish(&self, txn: &mut TransactionMut, local: bool) {
+        txn.commit();
+        if txn.delete_set().is_empty() && txn.after_state() == txn.before_state() {
+            return;
+        }
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        if local && self.log_local_updates {
+            self.pending.lock().unwrap().push(txn.encode_update_v1());
+        }
+    }
+
+    /// [`finish`](Self::finish) for a local mutation KNOWN to have integrated
+    /// a block - a map insert, an array push, a non-empty text insert: yrs
+    /// creates an item for each of these unconditionally, so the after-state
+    /// has moved and the comparison of the two state vectors (a hash lookup
+    /// per client the document has ever seen) is skipped.
+    fn finish_changed(&self, txn: &mut TransactionMut) {
+        txn.commit();
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        if self.log_local_updates {
+            self.pending.lock().unwrap().push(txn.encode_update_v1());
         }
     }
 
@@ -276,13 +358,48 @@ impl CrdtDoc {
 
     /// Set a last-writer-wins register field to `value`.
     pub fn set_register<T: Serialize>(&self, field: &str, value: &T) -> CrdtResult<()> {
+        let mut txn = self.doc.transact_mut();
+        let result = self.set_register_in(&mut txn, field, value);
+        // A value that failed to encode inserted nothing.
+        if result.is_ok() {
+            self.finish_changed(&mut txn);
+        } else {
+            self.finish(&mut txn, true);
+        }
+        result
+    }
+
+    // The body of the per-op method and of its batch twin; one caller is hot,
+    // so it is inlined into both rather than paying a frame at each.
+    #[inline(always)]
+    fn set_register_in<T: Serialize>(
+        &self,
+        txn: &mut TransactionMut,
+        field: &str,
+        value: &T,
+    ) -> CrdtResult<()> {
         let json = serde_json::to_string(value).map_err(|source| CrdtError::ValueCodec {
             field: field.to_string(),
             source,
         })?;
-        let mut txn = self.doc.transact_mut();
-        self.fields.insert(&mut txn, field, json);
+        self.fields.insert(txn, field, json);
         Ok(())
+    }
+
+    // ─── batches ─────────────────────────────────────────────────────────────
+
+    /// Run several mutations in ONE yrs transaction. Each mutator on this
+    /// document opens and commits its own transaction, and the commit - the
+    /// observer event, the revision bump and (for a logged document) the update
+    /// encoding - is most of a small write's cost. A batch pays it once: the
+    /// converged state is identical, and a logged document buffers one update
+    /// for the whole batch instead of one per mutation.
+    pub fn batch<R>(&self, f: impl FnOnce(&mut Batch<'_>) -> R) -> R {
+        let txn = self.doc.transact_mut();
+        let mut batch = Batch { doc: self, txn };
+        let result = f(&mut batch);
+        self.finish(&mut batch.txn, true);
+        result
     }
 
     /// Every register field currently set — the keys of the single root map (internal
@@ -302,6 +419,7 @@ impl CrdtDoc {
     pub fn remove_register(&self, field: &str) {
         let mut txn = self.doc.transact_mut();
         self.fields.remove(&mut txn, field);
+        self.finish(&mut txn, true);
     }
 
     /// Read a register field, or `None` if it was never set.
@@ -336,26 +454,59 @@ impl CrdtDoc {
     /// Add `delta` (which may be negative) to a PN-counter field. Each actor
     /// accumulates into its own subtotal, so concurrent increments merge by sum.
     pub fn increment(&self, field: &str, delta: i64) {
+        let mut txn = self.doc.transact_mut();
+        self.increment_in(&mut txn, field, delta);
+        self.finish_changed(&mut txn);
+    }
+
+    // The body of the per-op method and of its batch twin; one caller is hot,
+    // so it is inlined into both rather than paying a frame at each.
+    #[inline(always)]
+    fn increment_in(&self, txn: &mut TransactionMut, field: &str, delta: i64) {
         let mut on_stack = StackStr::<96>::new();
-        let key: Cow<str> = if write!(on_stack, "{SEP}c{SEP}{field}{SEP}{}", self.actor).is_ok() {
+        let key: Cow<str> = if on_stack.push_counter_key(field, self.actor).is_ok() {
             Cow::Borrowed(on_stack.as_str())
         } else {
             Cow::Owned(Self::counter_key(field, self.actor))
         };
-        let mut txn = self.doc.transact_mut();
-        let current: i64 = match self.fields.get(&txn, &key) {
-            Some(out) => with_text(out, &txn, |s| s.parse().unwrap_or(0)),
+        let current: i64 = match self.fields.get(txn, &key) {
+            Some(out) => with_text(out, txn, |s| s.parse().unwrap_or(0)),
             None => 0,
         };
         // Stored as a decimal string (everything in the map is a string), so the
         // value codec stays uniform with registers. An i64 is at most 20 digits.
         let mut value = StackStr::<24>::new();
-        write!(value, "{}", current + delta).expect("an i64 fits in 24 bytes");
-        self.fields.insert(&mut txn, &*key, value.as_str());
+        value.push_i64(current + delta).expect("an i64 fits in 24 bytes");
+        self.fields.insert(txn, &*key, value.as_str());
     }
 
     /// The current value of a PN-counter field: the sum of every actor's subtotal.
     pub fn counter(&self, field: &str) -> i64 {
+        let revision = self.revision();
+        let mut memo = self.counter_memo.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((_, _, total)) = memo
+            .iter()
+            .find(|(at, f, _)| *at == revision && f == field)
+        {
+            return *total;
+        }
+        let total = self.sum_counter(field);
+        // Replace this field's stale entry, else the stalest entry, else append.
+        if let Some(slot) = memo.iter_mut().find(|(_, f, _)| f == field) {
+            *slot = (revision, std::mem::take(&mut slot.1), total);
+        } else if memo.len() < COUNTER_MEMO_SLOTS {
+            memo.push((revision, field.to_string(), total));
+        } else if let Some(slot) = memo.iter_mut().min_by_key(|(at, _, _)| *at) {
+            slot.0 = revision;
+            slot.1.clear();
+            slot.1.push_str(field);
+            slot.2 = total;
+        }
+        total
+    }
+
+    /// The walk behind [`counter`](Self::counter): every subtotal under the field's prefix.
+    fn sum_counter(&self, field: &str) -> i64 {
         let prefix = Self::counter_prefix(field);
         let txn = self.doc.transact();
         self.fields
@@ -374,8 +525,20 @@ impl CrdtDoc {
     /// Append `content` to a collaborative text field.
     pub fn text_push(&self, field: &str, content: &str) {
         let mut txn = self.doc.transact_mut();
+        Self::text_push_in(&mut txn, field, content);
+        if content.is_empty() {
+            self.finish(&mut txn, true);
+        } else {
+            self.finish_changed(&mut txn);
+        }
+    }
+
+    // The body of the per-op method and of its batch twin; one caller is hot,
+    // so it is inlined into both rather than paying a frame at each.
+    #[inline(always)]
+    fn text_push_in(txn: &mut TransactionMut, field: &str, content: &str) {
         let text = txn.get_or_insert_text(Self::text_name(field).as_str());
-        text.push(&mut txn, content);
+        text.push(txn, content);
     }
 
     /// Insert `content` at character `index` in a collaborative text field.
@@ -383,6 +546,7 @@ impl CrdtDoc {
         let mut txn = self.doc.transact_mut();
         let text = txn.get_or_insert_text(Self::text_name(field).as_str());
         text.insert(&mut txn, index, content);
+        self.finish(&mut txn, true);
     }
 
     /// Remove `len` characters starting at `index` from a collaborative text
@@ -391,6 +555,7 @@ impl CrdtDoc {
         let mut txn = self.doc.transact_mut();
         let text = txn.get_or_insert_text(Self::text_name(field).as_str());
         text.remove_range(&mut txn, index, len);
+        self.finish(&mut txn, true);
     }
 
     /// The current contents of a collaborative text field (empty if never set).
@@ -425,9 +590,17 @@ impl CrdtDoc {
     /// Add `element` to an OR-Set field.
     pub fn set_add(&self, field: &str, element: &str) {
         let mut txn = self.doc.transact_mut();
+        Self::set_add_in(&mut txn, field, element);
+        self.finish_changed(&mut txn);
+    }
+
+    // The body of the per-op method and of its batch twin; one caller is hot,
+    // so it is inlined into both rather than paying a frame at each.
+    #[inline(always)]
+    fn set_add_in(txn: &mut TransactionMut, field: &str, element: &str) {
         let arr = txn.get_or_insert_array(Self::set_name(field).as_str());
         // `&str` becomes the same `Any::String` a `String` would, minus the copy.
-        arr.push_back(&mut txn, element);
+        arr.push_back(txn, element);
     }
 
     /// Remove every currently-observed occurrence of `element` from an OR-Set
@@ -446,14 +619,27 @@ impl CrdtDoc {
         for &i in matches.iter().rev() {
             arr.remove_range(&mut txn, i, 1);
         }
+        self.finish(&mut txn, true);
     }
 
     /// Whether `element` is currently in an OR-Set field.
     pub fn set_contains(&self, field: &str, element: &str) -> bool {
-        let txn = self.doc.transact();
-        match txn.get_array(Self::set_name(field).as_str()) {
-            Some(arr) => arr.iter(&txn).any(|out| with_text(out, &txn, |s| s == element)),
-            None => false,
+        let revision = self.revision();
+        let mut memo = self.set_memo.lock().unwrap_or_else(|p| p.into_inner());
+        match &*memo {
+            Some((at, f, members)) if *at == revision && f == field => members.contains(element),
+            _ => {
+                let txn = self.doc.transact();
+                let mut members = std::collections::HashSet::new();
+                if let Some(arr) = txn.get_array(Self::set_name(field).as_str()) {
+                    for out in arr.iter(&txn) {
+                        members.insert(out.to_string(&txn));
+                    }
+                }
+                let present = members.contains(element);
+                *memo = Some((revision, field.to_string(), members));
+                present
+            }
         }
     }
 
@@ -498,6 +684,25 @@ impl CrdtDoc {
         self.cached_state_vector(Vec::clone)
     }
 
+    /// Whether `bytes` is exactly this document's current state-vector encoding
+    /// (the bytes [`state_vector`](Self::state_vector) would return). Served from
+    /// the cache: a session whose causal token is this document's own frontier
+    /// learns it is caught up without decoding anything.
+    pub fn state_vector_is(&self, bytes: &[u8]) -> bool {
+        // Answered from the cache only: a stale cache means the document moved
+        // since the vector was taken, and this says "no" without rebuilding it
+        // (the caller's slow path will, in its own single transaction).
+        let revision = self.revision();
+        let cache = self.sv_cache.lock().unwrap_or_else(|p| p.into_inner());
+        matches!(&*cache, Some((at, sv)) if *at == revision && sv.as_slice() == bytes)
+    }
+
+    /// [`state_vector`](Self::state_vector) written into `out` (cleared first),
+    /// reusing its allocation.
+    pub fn state_vector_into(&self, out: &mut Vec<u8>) {
+        self.cached_state_vector(|sv| out.clone_from(sv))
+    }
+
     /// `tag ‖ `[`state_vector`](Self::state_vector) in one allocation, for a
     /// sender that frames the vector behind a tag byte: it is copied once, not
     /// twice.
@@ -537,9 +742,28 @@ impl CrdtDoc {
     /// [`take_local_updates`](Self::take_local_updates) and forward each raw update
     /// **verbatim** — those apply idempotently and never re-encode.
     pub fn encode_update_since(&self, their_state_vector: &[u8]) -> CrdtResult<Vec<u8>> {
+        let revision = self.revision();
+        let mut memo = self.delta_memo.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((at, sv, update)) = &*memo {
+            if *at == revision && sv.as_slice() == their_state_vector {
+                return Ok(update.clone());
+            }
+        }
         let sv = StateVector::decode_v1(their_state_vector)
             .map_err(|e| CrdtError::DecodeStateVector(e.to_string()))?;
-        Ok(self.doc.transact().encode_state_as_update_v1(&sv))
+        let update = self.doc.transact().encode_state_as_update_v1(&sv);
+        if update.len() <= DELTA_MEMO_MAX {
+            match &mut *memo {
+                Some((at, sv, kept)) => {
+                    *at = revision;
+                    sv.clear();
+                    sv.extend_from_slice(their_state_vector);
+                    kept.clone_from(&update);
+                }
+                slot => *slot = Some((revision, their_state_vector.to_vec(), update.clone())),
+            }
+        }
+        Ok(update)
     }
 
     /// Encode the document's entire state as a single update (the delta from
@@ -556,16 +780,12 @@ impl CrdtDoc {
     pub fn apply_update(&self, update: &[u8]) -> CrdtResult<()> {
         let update =
             Update::decode_v1(update).map_err(|e| CrdtError::DecodeUpdate(e.to_string()))?;
-        // Mark this as a remote integration so the observer doesn't re-buffer it as a
-        // local update. The flag must stay set until the transaction commits (on drop),
-        // because that's when the observer fires.
-        self.applying_remote.store(true, Ordering::Relaxed);
-        let result = {
-            let mut txn = self.doc.transact_mut();
-            txn.apply_update(update)
-                .map_err(|e| CrdtError::ApplyUpdate(e.to_string()))
-        };
-        self.applying_remote.store(false, Ordering::Relaxed);
+        let mut txn = self.doc.transact_mut();
+        let result = txn
+            .apply_update(update)
+            .map_err(|e| CrdtError::ApplyUpdate(e.to_string()));
+        // A remote integration: accounted for, never re-buffered as local.
+        self.finish(&mut txn, false);
         result
     }
 
@@ -598,6 +818,35 @@ impl CrdtDoc {
     }
 }
 
+/// Several mutations inside one transaction; see [`CrdtDoc::batch`]. The
+/// transaction commits when the batch is dropped, at the end of the closure.
+pub struct Batch<'d> {
+    doc: &'d CrdtDoc,
+    txn: TransactionMut<'d>,
+}
+
+impl Batch<'_> {
+    /// [`CrdtDoc::set_register`] inside the batch.
+    pub fn set_register<T: Serialize>(&mut self, field: &str, value: &T) -> CrdtResult<()> {
+        self.doc.set_register_in(&mut self.txn, field, value)
+    }
+
+    /// [`CrdtDoc::increment`] inside the batch.
+    pub fn increment(&mut self, field: &str, delta: i64) {
+        self.doc.increment_in(&mut self.txn, field, delta);
+    }
+
+    /// [`CrdtDoc::text_push`] inside the batch.
+    pub fn text_push(&mut self, field: &str, content: &str) {
+        CrdtDoc::text_push_in(&mut self.txn, field, content);
+    }
+
+    /// [`CrdtDoc::set_add`] inside the batch.
+    pub fn set_add(&mut self, field: &str, element: &str) {
+        CrdtDoc::set_add_in(&mut self.txn, field, element);
+    }
+}
+
 /// How many operations `peer` has that `mine` lacks.
 fn missing_ops(peer: &StateVector, mine: &StateVector) -> usize {
     let mut missing = 0usize;
@@ -608,4 +857,25 @@ fn missing_ops(peer: &StateVector, mine: &StateVector) -> usize {
         }
     }
     missing
+}
+
+#[cfg(test)]
+mod stack_str_tests {
+    #[test]
+    fn stack_decimal_matches_display() {
+        for v in [
+            0i64, 1, -1, 9, 10, -10, 99, 100, 12345, -12345, i64::MAX, i64::MIN,
+            i64::MIN + 1, 1_000_000_007, -999_999_999_999,
+        ] {
+            let mut s = super::StackStr::<24>::new();
+            s.push_i64(v).unwrap();
+            assert_eq!(s.as_str(), v.to_string(), "{v}");
+        }
+        let mut key = super::StackStr::<96>::new();
+        key.push_counter_key("visits", 18446744073709551615).unwrap();
+        assert_eq!(key.as_str(), super::CrdtDoc::counter_key("visits", u64::MAX));
+        // Too long for the stack: an error, not a truncated key.
+        let mut small = super::StackStr::<8>::new();
+        assert!(small.push_counter_key("visits", 7).is_err());
+    }
 }

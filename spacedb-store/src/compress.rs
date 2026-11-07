@@ -23,7 +23,30 @@
 
 use std::borrow::Cow;
 
+use rusty_zstd::{CompressOptions, DecompressOptions};
+
 use crate::error::{StoreError, StoreResult};
+
+/// Rows are compressed WITHOUT zstd's XXH64 content checksum: the frame sits
+/// inside an AES-GCM envelope whose tag already authenticates every byte, so
+/// the checksum (a second pass over the plaintext on every seal and open, plus
+/// four bytes per row) could only ever re-detect what the tag already rejects.
+/// Frames written with a checksum by earlier releases still decode: the flag
+/// is in each frame's header and verification is skipped on read for the same
+/// reason.
+fn row_compress_options(level: i32) -> CompressOptions {
+    CompressOptions {
+        level,
+        checksum: false,
+    }
+}
+
+fn row_decompress_options() -> DecompressOptions {
+    DecompressOptions {
+        force_ignore_checksum: true,
+        ..DecompressOptions::default()
+    }
+}
 
 /// Format byte: the payload is the encoded value, verbatim.
 pub const FORMAT_RAW: u8 = 0x00;
@@ -78,7 +101,7 @@ impl Default for Compression {
 pub(crate) fn pack_value(plain: &[u8], policy: Compression) -> Vec<u8> {
     if let Compression::On { level, min_len } = policy {
         if plain.len() >= min_len {
-            if let Ok(z) = rusty_zstd::compress(plain, level) {
+            if let Ok(z) = rusty_zstd::compress_with(plain, row_compress_options(level)) {
                 if z.len() < plain.len() {
                     let mut out = Vec::with_capacity(1 + z.len());
                     out.push(FORMAT_ZSTD);
@@ -103,7 +126,7 @@ pub(crate) fn pack_value_in_place(row: &mut Vec<u8>, at: usize, policy: Compress
     if let Compression::On { level, min_len } = policy {
         let plain_len = row.len() - at - 1;
         if plain_len >= min_len {
-            if let Ok(z) = rusty_zstd::compress(&row[at + 1..], level) {
+            if let Ok(z) = rusty_zstd::compress_with(&row[at + 1..], row_compress_options(level)) {
                 if z.len() < plain_len {
                     row.truncate(at);
                     row.push(FORMAT_ZSTD);
@@ -122,9 +145,28 @@ pub(crate) fn unpack_value(packed: &[u8]) -> StoreResult<Cow<'_, [u8]>> {
     match packed.split_first() {
         // Raw: the value is already sitting there — borrow it, don't copy it.
         Some((&FORMAT_RAW, rest)) => Ok(Cow::Borrowed(rest)),
-        Some((&FORMAT_ZSTD, rest)) => rusty_zstd::decompress(rest)
+        Some((&FORMAT_ZSTD, rest)) => rusty_zstd::decompress_with(rest, row_decompress_options())
             .map(Cow::Owned)
             .map_err(|e| StoreError::Compression(format!("zstd frame: {e:?}"))),
+        Some((&byte, _)) => Err(StoreError::Compression(format!(
+            "unknown row format byte {byte:#04x}"
+        ))),
+        None => Err(StoreError::Compression("empty sealed payload".into())),
+    }
+}
+
+/// [`unpack_value`] decompressing into `scratch` (cleared first) instead of a
+/// fresh buffer, for a scan that unpacks many rows: the raw case still borrows
+/// the payload; the zstd case borrows `scratch` after filling it.
+pub(crate) fn unpack_value_into<'a>(packed: &'a [u8], scratch: &'a mut Vec<u8>) -> StoreResult<&'a [u8]> {
+    match packed.split_first() {
+        Some((&FORMAT_RAW, rest)) => Ok(rest),
+        Some((&FORMAT_ZSTD, rest)) => {
+            scratch.clear();
+            rusty_zstd::decompress_into_with(scratch, rest, row_decompress_options())
+                .map_err(|e| StoreError::Compression(format!("zstd frame: {e:?}")))?;
+            Ok(scratch.as_slice())
+        }
         Some((&byte, _)) => Err(StoreError::Compression(format!(
             "unknown row format byte {byte:#04x}"
         ))),
@@ -135,6 +177,32 @@ pub(crate) fn unpack_value(packed: &[u8]) -> StoreResult<Cow<'_, [u8]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unpack_into_matches_unpack() {
+        let plain = vec![b'z'; 2048];
+        for packed in [pack_value(&plain, Compression::default()), pack_value(b"short", Compression::Off)] {
+            let mut scratch = vec![0xAA; 7];
+            let a = unpack_value(&packed).unwrap().into_owned();
+            let b = unpack_value_into(&packed, &mut scratch).unwrap().to_vec();
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn checksummed_legacy_frames_still_decode() {
+        // A row written by a release that kept zstd's content checksum.
+        let plain = vec![b'q'; 2048];
+        let legacy = rusty_zstd::compress(&plain, DEFAULT_COMPRESSION_LEVEL).unwrap();
+        let mut packed = vec![FORMAT_ZSTD];
+        packed.extend_from_slice(&legacy);
+        assert_eq!(&*unpack_value(&packed).unwrap(), &plain[..]);
+        let mut scratch = Vec::new();
+        assert_eq!(unpack_value_into(&packed, &mut scratch).unwrap(), &plain[..]);
+        // And the new frame is shorter by exactly the checksum.
+        let fresh = pack_value(&plain, Compression::default());
+        assert_eq!(fresh.len() + 4, packed.len());
+    }
 
     #[test]
     fn raw_round_trips() {

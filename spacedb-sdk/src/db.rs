@@ -8,13 +8,10 @@
 //! no network at all.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use crate::names::NameMap;
 use std::hash::{Hash, Hasher};
 
-use spacedb_access::{
-    AccessRequest, Decision, Identity, MemKeyDirectory, Ops, RevocationSet, Scope,
-    SignedCapability,
-};
+use spacedb_access::{Decision, Identity, MemKeyDirectory, Ops, RevocationSet, SignedCapability};
 use spacedb_consistency::{Outcome, QuorumGroup, StrongResult, Tier};
 use spacedb_crdt::{CrdtDoc, CrdtError, Watcher};
 use spacedb_meter::{MeterError, RateCard, Usage};
@@ -35,8 +32,8 @@ pub struct Database {
     revocations: RevocationSet,
     rate_card: RateCard,
     clock: u64,
-    schemas: HashMap<String, Schema>,
-    docs: HashMap<String, CrdtDoc>,
+    schemas: NameMap<Schema>,
+    docs: NameMap<CrdtDoc>,
     quorum: QuorumGroup,
 }
 
@@ -53,8 +50,8 @@ impl Database {
             revocations: RevocationSet::new(),
             rate_card: default_rate_card(),
             clock: 0,
-            schemas: HashMap::new(),
-            docs: HashMap::new(),
+            schemas: NameMap::default(),
+            docs: NameMap::default(),
             // a self-hosted 3-member strong-tier quorum (placement is the M4 seam)
             quorum: QuorumGroup::new(["q0", "q1", "q2"]),
         }
@@ -317,16 +314,17 @@ impl Database {
     }
 
     fn authorize_op(&self, session: &mut Session, collection: &str, op: Ops) -> SdkResult<()> {
-        let scope = Scope::Collection(collection.to_string());
-        let request = AccessRequest {
-            bearer: &session.actor,
-            scope: &scope,
+        // The collection is passed as a name: no `Scope` (and no owned copy of
+        // the name) is built per op. Round 1 measured a cached Scope as worse
+        // than the copy; this has neither.
+        match session.capability.authorize_collection(
+            &session.actor,
+            collection,
             op,
-        };
-        match session
-            .capability
-            .authorize(&request, &self.directory, self.clock, &self.revocations)
-        {
+            &self.directory,
+            self.clock,
+            &self.revocations,
+        ) {
             Ok(Decision::Allow) => Ok(()),
             Ok(Decision::Deny(reason)) => Err(SdkError::Denied(reason)),
             Err(e) => Err(SdkError::Auth(e.to_string())),
@@ -345,7 +343,9 @@ impl Database {
         let actor = self.actor_id;
         self.docs
             .entry(collection.to_string())
-            .or_insert_with(|| CrdtDoc::new(actor))
+            // Unlogged: the SDK never drains take_local_updates, so a logged document
+            // would encode every write into a buffer nobody reads (and grow it forever).
+            .or_insert_with(|| CrdtDoc::new_unlogged(actor))
     }
 }
 

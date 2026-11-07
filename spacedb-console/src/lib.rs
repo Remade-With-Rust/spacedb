@@ -28,6 +28,7 @@
 //!
 //! Open-core (MIT). Fed by observation DTOs, so it stays decoupled and testable.
 
+mod intern;
 mod observe;
 pub use observe::{
     AgentBudgetObs, AuditObs, CapabilityObs, HomeObs, LagObs, SettledObs, ShardObs, StrongObs,

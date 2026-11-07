@@ -95,6 +95,11 @@ pub fn run_query(
     plan: &QueryPlan,
     shards: &[Shard],
 ) -> QueryResult<QueryOutcome> {
+    // Each module is hashed once for the whole query, and a shard's snapshot
+    // already carries the digest of its bytes: nothing is hashed per shard.
+    let map_hash = *blake3::hash(plan.map_wasm).as_bytes();
+    let reduce_hash = *blake3::hash(plan.reduce_wasm).as_bytes();
+
     // Map phase: run the query next to each reachable shard's data.
     let mut partials: Vec<Vec<u8>> = Vec::new();
     let mut map_runs: Vec<FunctionRun> = Vec::new();
@@ -102,7 +107,13 @@ pub fn run_query(
         if !shard.reachable {
             continue;
         }
-        let exec = runtime.run(plan.map_wasm, shard.snapshot.bytes(), &plan.limits)?;
+        let exec = runtime.run_prehashed(
+            &map_hash,
+            plan.map_wasm,
+            shard.snapshot.bytes(),
+            Some(shard.snapshot.hash()),
+            &plan.limits,
+        )?;
         partials.push(exec.output);
         map_runs.push(exec.run);
     }
@@ -122,7 +133,9 @@ pub fn run_query(
         let mut framed = Vec::new();
         for partial in partials {
             frame_pair_into(&mut framed, &acc, &partial);
-            acc = runtime.run(plan.reduce_wasm, &framed, &plan.limits)?.output;
+            acc = runtime
+                .run_prehashed(&reduce_hash, plan.reduce_wasm, &framed, None, &plan.limits)?
+                .output;
         }
         Some(acc)
     };

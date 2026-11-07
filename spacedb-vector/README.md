@@ -15,7 +15,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dependencies]
-spacedb-vector = "0.5"
+spacedb-vector = "0.7"
 ```
 
 ## The model
@@ -58,6 +58,15 @@ recall knob nobody measured.
 
 Depends only on [`spacedb-access`](https://github.com/Remade-With-Rust/spacedb/tree/HEAD/spacedb-access), for the capability gate.
 No MATA crate.
+
+## Performance (0.7.2)
+
+Measured on exact instruction counts (callgrind) with deterministic drivers
+whose outputs did not change; release build, 0.7.1 -> 0.7.2:
+`ir_vector` 33.1M -> 23.3M (**-29.8%**).
+
+- Dot product and L2 run on eight independent accumulators over fixed chunks, so they vectorize. An `f32` score can differ from 0.7.1 in its last bits; top-k sets match serial scoring in the tests.
+- The id-to-position map hashes with FNV.
 
 ## Performance (0.7.0)
 

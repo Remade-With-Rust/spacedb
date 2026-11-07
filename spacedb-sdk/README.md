@@ -19,7 +19,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dependencies]
-spacedb-sdk = "0.5"
+spacedb-sdk = "0.7"
 ```
 
 ## Memory allocation (`rusty_alloc`) — on by default
@@ -43,10 +43,10 @@ An unconfigured node should be the hardened one, so this is opt-**out**:
 
 ```toml
 # Bring your own allocator (jemalloc, mimalloc, the system one, …)
-spacedb-sdk = { version = "0.5", default-features = false }
+spacedb-sdk = { version = "0.7", default-features = false }
 
 # Or the hardened node profile
-spacedb-sdk = { version = "0.5", features = ["secure"] }
+spacedb-sdk = { version = "0.7", features = ["secure"] }
 ```
 
 Disabling it removes `rusty_alloc` from the dependency graph entirely — not
@@ -165,6 +165,17 @@ if watcher.drain_changed() { /* re-render */ }
 
 `quorum_partition` / `quorum_heal` let a test take strong-tier members offline
 and prove the group fails safe instead of splitting.
+
+## Performance (0.7.2)
+
+Measured on exact instruction counts (callgrind) with deterministic drivers
+whose outputs did not change; release build, 0.7.1 -> 0.7.2:
+`ir_sdk` 12.2M -> 11.1M (-9.0%), `ir_claims` 14.4M -> 14.2M (-1.6%).
+
+- SDK documents are unlogged: nothing drains their update log, so they no longer fill it.
+- Sessions authorize a collection with `authorize_collection`, no `Scope` built per op.
+- Collection, document and field name maps hash with FNV-1a.
+- `rusty_alloc-api` 2.4.0 (from 2.2.6), the latest release.
 
 ## Performance (0.7.0)
 

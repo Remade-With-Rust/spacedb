@@ -6,6 +6,7 @@
 //! seam over its `did:mata` / IAMHUMAN directory (Supabase-hosted DID documents).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use crate::error::{AccessError, AccessResult};
@@ -23,12 +24,21 @@ pub trait KeyDirectory {
     fn published_key_is(&self, did: &Did, key: &[u8]) -> AccessResult<bool> {
         Ok(self.published_key(did)?.as_deref() == Some(key))
     }
+
+    /// A counter that changes whenever any published key changes, or `None` if
+    /// the directory cannot say. A holder that verified under one generation
+    /// may skip re-reading the key while the generation is unchanged.
+    fn generation(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// In-memory DID → key directory, for tests and single-machine use.
 #[derive(Default)]
 pub struct MemKeyDirectory {
     keys: RwLock<HashMap<Did, Vec<u8>>>,
+    /// Bumped on every publish; see [`KeyDirectory::generation`].
+    generation: AtomicU64,
 }
 
 impl MemKeyDirectory {
@@ -47,6 +57,7 @@ impl MemKeyDirectory {
             .write()
             .map_err(|_| AccessError::Directory("lock poisoned".into()))?
             .insert(did, public_sec1);
+        self.generation.fetch_add(1, Ordering::Release);
         Ok(())
     }
 }
@@ -68,5 +79,9 @@ impl KeyDirectory for MemKeyDirectory {
             .map_err(|_| AccessError::Directory("lock poisoned".into()))?
             .get(did)
             .is_some_and(|k| k.as_slice() == key))
+    }
+
+    fn generation(&self) -> Option<u64> {
+        Some(self.generation.load(Ordering::Acquire))
     }
 }

@@ -112,6 +112,44 @@ impl KeyProvider for StaticKeyProvider {
     }
 }
 
+/// A service's store key kept in a file beside its database: read if present
+/// (it must be exactly [`KEY_LEN`] bytes), else generated and written.
+///
+/// The file is created owner-only (`0600` on Unix) and with `create_new`.
+/// Every service used to write it with the default mode and narrow it
+/// afterwards, ignoring a failed narrowing, so the key was readable by every
+/// local user in between, or for good; `create_new` also refuses a file or
+/// link that appeared after the read failed.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_or_create_key_file(path: &std::path::Path) -> std::io::Result<[u8; KEY_LEN]> {
+    use std::io::{Error, ErrorKind, Write as _};
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            return bytes.try_into().map_err(|b: Vec<u8>| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("{} is corrupt: {} bytes, expected {KEY_LEN}", path.display(), b.len()),
+                )
+            })
+        }
+        Err(e) if e.kind() != ErrorKind::NotFound => return Err(e),
+        Err(_) => {}
+    }
+    let mut key = [0u8; KEY_LEN];
+    OsRng.fill_bytes(&mut key);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(path)?;
+    f.write_all(&key)?;
+    f.sync_all()?;
+    Ok(key)
+}
+
 /// A DEK encrypted under the vault key. The collection id it is bound to is the
 /// key it is stored under (in the reserved `_dek_wrappings` table), and is passed
 /// explicitly as AAD to [`unwrap_dek`] — it is not stored in the struct.
@@ -124,7 +162,9 @@ pub struct WrappedDek {
     pub wrap_ciphertext: Vec<u8>,
 }
 
-fn cipher_for(key: &[u8; KEY_LEN]) -> Aes256Gcm {
+/// The AES-256-GCM instance for a key: the AES key schedule plus the GHASH
+/// key, which is what every seal and open would otherwise rebuild.
+pub(crate) fn cipher_for(key: &[u8; KEY_LEN]) -> Aes256Gcm {
     Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_slice()))
 }
 
@@ -317,11 +357,23 @@ pub(crate) fn seal_row_in_place(
     schema_version: u32,
     row: &mut Vec<u8>,
 ) -> Result<(), CryptoError> {
+    seal_row_in_place_with(&cipher_for(dek), table, key, schema_version, row)
+}
+
+/// [`seal_row_in_place`] with the DEK's cipher already built (a collection
+/// keeps it across rows). Same bytes.
+pub(crate) fn seal_row_in_place_with(
+    cipher: &Aes256Gcm,
+    table: &str,
+    key: &[u8],
+    schema_version: u32,
+    row: &mut Vec<u8>,
+) -> Result<(), CryptoError> {
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
     row[..NONCE_LEN].copy_from_slice(&nonce);
     let tag = with_row_aad(table, key, schema_version, |aad| {
-        cipher_for(dek).encrypt_in_place_detached(Nonce::from_slice(&nonce), aad, &mut row[NONCE_LEN..])
+        cipher.encrypt_in_place_detached(Nonce::from_slice(&nonce), aad, &mut row[NONCE_LEN..])
     })
     .map_err(|e| CryptoError::Aead(format!("seal: {e}")))?;
     row.extend_from_slice(&tag);
@@ -356,20 +408,19 @@ pub fn open_row(
         .map_err(|e| CryptoError::Aead(format!("open: {e}")))
 }
 
-/// [`open_row`] on a row the caller owns: decrypts in place and returns where
-/// the plaintext sits inside `sealed` (between the nonce and the tag), so a
-/// get decodes straight out of the buffer the engine handed back instead of
-/// allocating a plaintext copy. Same checks, same errors, same plaintext.
-pub(crate) fn open_row_in_place(
-    dek: &[u8; KEY_LEN],
+/// [`open_row`] on a row the caller owns, with the DEK's cipher already built
+/// (a collection keeps it): decrypts in place and returns where the plaintext
+/// sits inside `sealed` (between the nonce and the tag), so a get decodes
+/// straight out of the buffer the engine handed back instead of allocating a
+/// plaintext copy. Same checks, same errors, same plaintext.
+pub(crate) fn open_row_in_place_with(
+    cipher: &Aes256Gcm,
     table: &str,
     key: &[u8],
     schema_version: u32,
     sealed: &mut [u8],
 ) -> Result<Range<usize>, CryptoError> {
-    with_row_aad(table, key, schema_version, |aad| {
-        open_in_place_with(&cipher_for(dek), aad, sealed)
-    })
+    with_row_aad(table, key, schema_version, |aad| open_in_place_with(cipher, aad, sealed))
 }
 
 fn open_in_place_with(
@@ -403,9 +454,10 @@ pub(crate) struct RowOpener {
 }
 
 impl RowOpener {
-    pub(crate) fn new(dek: &[u8; KEY_LEN]) -> Self {
+    /// An opener around the DEK's already-built cipher.
+    pub(crate) fn from_cipher(cipher: Aes256Gcm) -> Self {
         Self {
-            cipher: cipher_for(dek),
+            cipher,
             aad: Vec::new(),
         }
     }
@@ -430,6 +482,26 @@ mod tests {
 
     const VK_A: [u8; KEY_LEN] = [0xAA; KEY_LEN];
     const VK_B: [u8; KEY_LEN] = [0xBB; KEY_LEN];
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_key_file_is_created_owner_only_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("spacedb-keyfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.key");
+        let _ = std::fs::remove_file(&path);
+        let k = load_or_create_key_file(&path).unwrap();
+        assert_eq!(load_or_create_key_file(&path).unwrap(), k, "the second open reads the first key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "created readable by others");
+        }
+        std::fs::write(&path, [1u8; 5]).unwrap();
+        assert_eq!(load_or_create_key_file(&path).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn stack_aad_matches_heap_aad_at_every_size() {

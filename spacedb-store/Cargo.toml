@@ -1,6 +1,6 @@
 [package]
 name = "spacedb-store"
-version = "0.7.0"
+version = "0.7.2"
 edition = "2021"
 rust-version = "1.95"
 readme = "README.md"
@@ -55,7 +55,7 @@ thiserror = "1"
 # Transparent per-row compression inside the AEAD boundary (compress, then
 # encrypt â ciphertext is incompressible). Pure Rust, zero deps, RFC 8878
 # interop-verified against C zstd.
-rusty_zstd = "0.3"
+rusty_zstd = "0.4.1"
 
 # The durable engine: MIT/Apache-2.0 (no BUSL in the customer product), stable
 # on-disk format, crash-tested, synchronous (no async/sync bridge). See mission L0.
@@ -63,6 +63,9 @@ rusty_zstd = "0.3"
 # host persists snapshots — e.g. IndexedDB — through its own adapter instead).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 redb = "2"
+# Holds a redb write transaction together with the tables opened in it (which
+# borrow the transaction) as one value, without unsafe code of our own.
+self_cell = "1"
 
 # On wasm32-unknown-unknown, OS randomness must be wired explicitly: `rand 0.8`'s
 # OsRng rides getrandom 0.2, whose browser backend is the `js` feature.

@@ -108,7 +108,29 @@ fn check_request(cap: &Capability, request: &AccessRequest, now_unix: u64) -> Op
     if !cap.scope.covers(request.scope) {
         return Some(DenyReason::OutOfScope);
     }
-    if !cap.ops.contains(request.op) {
+    check_op_and_expiry(cap, request.op, now_unix)
+}
+
+/// [`check_request`] for a request on a whole collection, with the scope
+/// borrowed as a name: the same four checks in the same order, no `Scope` built.
+fn check_collection_request(
+    cap: &Capability,
+    bearer: &Did,
+    collection: &str,
+    op: Ops,
+    now_unix: u64,
+) -> Option<DenyReason> {
+    if &cap.bearer != bearer {
+        return Some(DenyReason::BearerMismatch);
+    }
+    if !cap.scope.covers_collection(collection) {
+        return Some(DenyReason::OutOfScope);
+    }
+    check_op_and_expiry(cap, op, now_unix)
+}
+
+fn check_op_and_expiry(cap: &Capability, op: Ops, now_unix: u64) -> Option<DenyReason> {
+    if !cap.ops.contains(op) {
         return Some(DenyReason::OpNotGranted);
     }
     if let Some(expiry) = cap.expiry {
@@ -188,6 +210,10 @@ pub fn authorize(
 pub struct HeldCapability {
     signed: SignedCapability,
     verified_under: Option<Vec<u8>>,
+    /// The directory generation `verified_under` was read at, when the directory
+    /// publishes one: an unchanged generation means the key is unchanged, so the
+    /// key itself need not be re-read and compared on every call.
+    verified_generation: Option<u64>,
 }
 
 impl HeldCapability {
@@ -195,6 +221,7 @@ impl HeldCapability {
         Self {
             signed,
             verified_under: None,
+            verified_generation: None,
         }
     }
 
@@ -211,31 +238,71 @@ impl HeldCapability {
         now_unix: u64,
         revocations: &RevocationSet,
     ) -> AccessResult<Decision> {
-        let issuer = &self.signed.capability.issuer;
-        // Still the key the signature verified under? Asked in place - no copy
-        // of the key on the per-call path.
-        let unchanged = match &self.verified_under {
-            Some(known) => directory.published_key_is(issuer, known)?,
-            None => false,
-        };
-        if !unchanged {
-            let key = match directory.published_key(issuer)? {
-                Some(k) => k,
-                None => return Ok(Decision::Deny(DenyReason::UnknownIssuer)),
-            };
-            let canonical = self.signed.capability.canonical_bytes()?;
-            if !verify_sec1(&key, &canonical, &self.signed.issuer_signature) {
-                return Ok(Decision::Deny(DenyReason::BadSignature));
-            }
-            self.verified_under = Some(key);
-        }
-        if revocations.is_revoked(&self.signed.capability.id) {
-            return Ok(Decision::Deny(DenyReason::Revoked));
+        if let Some(deny) = self.check_credential(directory, revocations)? {
+            return Ok(Decision::Deny(deny));
         }
         if let Some(reason) = check_request(&self.signed.capability, request, now_unix) {
             return Ok(Decision::Deny(reason));
         }
         Ok(Decision::Allow)
+    }
+
+    /// [`authorize`](Self::authorize) for `bearer` performing `op` on the whole
+    /// `collection` - the request every database op makes - without the caller
+    /// building a `Scope` (and its owned name) per call. Same decision.
+    pub fn authorize_collection(
+        &mut self,
+        bearer: &Did,
+        collection: &str,
+        op: Ops,
+        directory: &dyn KeyDirectory,
+        now_unix: u64,
+        revocations: &RevocationSet,
+    ) -> AccessResult<Decision> {
+        if let Some(deny) = self.check_credential(directory, revocations)? {
+            return Ok(Decision::Deny(deny));
+        }
+        if let Some(reason) =
+            check_collection_request(&self.signed.capability, bearer, collection, op, now_unix)
+        {
+            return Ok(Decision::Deny(reason));
+        }
+        Ok(Decision::Allow)
+    }
+
+    /// The request-independent half: signature (memoized) and revocation.
+    fn check_credential(
+        &mut self,
+        directory: &dyn KeyDirectory,
+        revocations: &RevocationSet,
+    ) -> AccessResult<Option<DenyReason>> {
+        let issuer = &self.signed.capability.issuer;
+        // Still the key the signature verified under? Asked in place - no copy
+        // of the key on the per-call path.
+        let generation = directory.generation();
+        let unchanged = match (&self.verified_under, generation, self.verified_generation) {
+            (Some(_), Some(now), Some(seen)) if now == seen => true,
+            (Some(known), _, _) => directory.published_key_is(issuer, known)?,
+            (None, _, _) => false,
+        };
+        if !unchanged {
+            let key = match directory.published_key(issuer)? {
+                Some(k) => k,
+                None => return Ok(Some(DenyReason::UnknownIssuer)),
+            };
+            let canonical = self.signed.capability.canonical_bytes()?;
+            if !verify_sec1(&key, &canonical, &self.signed.issuer_signature) {
+                return Ok(Some(DenyReason::BadSignature));
+            }
+            self.verified_under = Some(key);
+            self.verified_generation = generation;
+        } else if self.verified_generation.is_none() {
+            self.verified_generation = generation;
+        }
+        if revocations.is_revoked(&self.signed.capability.id) {
+            return Ok(Some(DenyReason::Revoked));
+        }
+        Ok(None)
     }
 }
 

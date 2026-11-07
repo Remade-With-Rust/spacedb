@@ -17,7 +17,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dependencies]
-spacedb-replica = "0.5"
+spacedb-replica = "0.7"
 ```
 
 ## The model
@@ -86,6 +86,14 @@ partition recovery — is provable inside one process with no sockets.
 ## Open-core boundary
 
 Depends only on [`spacedb-crdt`](https://github.com/Remade-With-Rust/spacedb/tree/HEAD/spacedb-crdt). No MATA crate is referenced.
+
+## Performance (0.7.2)
+
+Measured on exact instruction counts (callgrind) with deterministic drivers
+whose outputs did not change; release build, 0.7.1 -> 0.7.2:
+`ir_session` 11.3M -> 10.2M (-9.6%).
+
+- No code change here: the gain is `spacedb-crdt`'s remembered `encode_update_since` answer and its cheaper transactions.
 
 ## Performance (0.7.0)
 

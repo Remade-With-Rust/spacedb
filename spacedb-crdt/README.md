@@ -17,7 +17,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dependencies]
-spacedb-crdt = "0.5"
+spacedb-crdt = "0.7"
 ```
 
 ## The model
@@ -95,6 +95,19 @@ final state.
 ## Open-core boundary
 
 Depends on `yrs` and `spacedb-store` — never on a MATA crate.
+
+## Performance (0.7.2)
+
+Measured on exact instruction counts (callgrind) with deterministic drivers
+whose outputs did not change; release build, 0.7.1 -> 0.7.2:
+`ir_crdt` 146.3M -> 130.8M (-10.6%), `ir_ops` 33.9M -> 29.7M (-12.7%), `ir_batch` 15.5M -> 14.2M (-8.4%).
+
+- No yrs cleanup observer: it cloned three structures per transaction. Each mutation now finishes its own transaction (revision and update log exactly as before), and a mutation known to insert skips the state-vector comparison.
+- `CrdtDoc::batch` runs many mutations in one yrs transaction; the batch driver does the ops driver's work in under half the instructions.
+- Counter keys and values are written on the stack without the formatter.
+- `counter()` and set membership are remembered until the document's revision changes.
+- `encode_update_since` remembers its last answer (up to 256 KiB) for the same revision and peer state vector; new `state_vector_is` and `state_vector_into` compare or write the state vector without allocating.
+- `CrdtStore` lends document ids as `&str` keys to the store.
 
 ## Performance (0.7.0)
 

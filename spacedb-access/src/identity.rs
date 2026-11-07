@@ -9,6 +9,7 @@
 //! [`KeyDirectory`]: crate::KeyDirectory
 
 use std::collections::HashSet;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::{Mutex, OnceLock};
 
 use p256::ecdsa::signature::{Signer, Verifier};
@@ -88,7 +89,10 @@ impl Identity {
 /// Returns `false` (not an error) on any parse or verification failure — a bad
 /// signature is a [`Deny`](crate::Decision), not a system error.
 pub(crate) fn verify_sec1(public_sec1: &[u8], message: &[u8], sig_der: &[u8]) -> bool {
-    let id = verification_id(public_sec1, blake3::hash(message).as_bytes(), sig_der);
+    // One BLAKE3 over (key, message, signature). The audit log keys its entries
+    // by the message DIGEST instead (it has one already); the two id spaces are
+    // distinct by their length prefixes and never look each other up.
+    let id = message_verification_id(public_sec1, message, sig_der);
     if already_verified(&id) {
         return true;
     }
@@ -114,8 +118,31 @@ pub(crate) fn verify_sec1(public_sec1: &[u8], message: &[u8], sig_der: &[u8]) ->
 
 const VERIFIED_CAP: usize = 4096;
 
-fn verified() -> &'static Mutex<HashSet<[u8; 32]>> {
-    static VERIFIED: OnceLock<Mutex<HashSet<[u8; 32]>>> = OnceLock::new();
+/// The set's hasher takes 8 bytes of the id: a verification id is a BLAKE3
+/// output, already uniform, so SipHash-ing it again bought nothing.
+type VerifiedSet = HashSet<[u8; 32], BuildHasherDefault<IdHasher>>;
+
+#[derive(Default)]
+struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        // `[u8; 32]` hashes as its length (`write_usize`) then its bytes.
+        let mut word = [0u8; 8];
+        let n = bytes.len().min(8);
+        word[..n].copy_from_slice(&bytes[..n]);
+        self.0 ^= u64::from_le_bytes(word);
+    }
+
+    fn write_usize(&mut self, _len: usize) {}
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+fn verified() -> &'static Mutex<VerifiedSet> {
+    static VERIFIED: OnceLock<Mutex<VerifiedSet>> = OnceLock::new();
     VERIFIED.get_or_init(Default::default)
 }
 
@@ -126,6 +153,20 @@ pub(crate) fn verification_id(public_sec1: &[u8], message_digest: &[u8; 32], sig
     h.update(&(public_sec1.len() as u64).to_le_bytes());
     h.update(public_sec1);
     h.update(message_digest);
+    h.update(&(sig_der.len() as u64).to_le_bytes());
+    h.update(sig_der);
+    *h.finalize().as_bytes()
+}
+
+/// The cache identity of a verification keyed by the message itself: the key,
+/// the message and the signature, each length-prefixed. One hash where
+/// [`verification_id`] needs the message hashed first.
+pub(crate) fn message_verification_id(public_sec1: &[u8], message: &[u8], sig_der: &[u8]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(&(public_sec1.len() as u64).to_le_bytes());
+    h.update(public_sec1);
+    h.update(&(message.len() as u64).to_le_bytes());
+    h.update(message);
     h.update(&(sig_der.len() as u64).to_le_bytes());
     h.update(sig_der);
     *h.finalize().as_bytes()
@@ -157,4 +198,25 @@ pub(crate) fn verify_with_key(key: &VerifyingKey, message: &[u8], sig_der: &[u8]
         Ok(signature) => key.verify(message, &signature).is_ok(),
         Err(_) => false,
     }
+}
+
+#[cfg(test)]
+mod known_answer {
+    use super::*;
+
+    /// RFC 6979 makes signing deterministic: this DER signature of a fixed
+    /// message under a fixed key must never change, whatever the scalar
+    /// multiplication underneath does (captured before the fixed-base table).
+    #[test]
+    fn signature_matches_the_captured_vector() {
+        let key = SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
+        let sig: Signature = key.sign(b"spacedb known answer");
+        let der = sig.to_der();
+        let hex: String = der.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, KNOWN_DER, "signature bytes moved");
+        let vk = VerifyingKey::from(&key);
+        assert!(vk.verify(b"spacedb known answer", &sig).is_ok());
+    }
+
+    const KNOWN_DER: &str = "3045022060a71d44070484f94957d81a9d3a4cdf04dea73e2a00f366957a4ce01c7c595502210098042e28c46549e0c7e4058aaede8154799df8f0e8de48ca9ce6c9f2d57d1569";
 }

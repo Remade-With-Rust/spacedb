@@ -19,7 +19,7 @@ mod error;
 pub use error::{CrdtError, CrdtResult};
 
 mod doc;
-pub use doc::CrdtDoc;
+pub use doc::{Batch, CrdtDoc};
 
 mod reactive;
 pub use reactive::{ReactiveQuery, Watcher};

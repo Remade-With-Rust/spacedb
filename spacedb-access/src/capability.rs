@@ -27,6 +27,13 @@ impl Scope {
     /// Whether this (granted) scope covers a `requested` access scope. A
     /// collection grant covers any document in it; document and function grants
     /// match exactly.
+    /// Whether this scope covers a request for the whole `collection` -
+    /// [`covers`](Self::covers) of `Scope::Collection(collection)`, without
+    /// building that value.
+    pub fn covers_collection(&self, collection: &str) -> bool {
+        matches!(self, Scope::Collection(c) if c == collection)
+    }
+
     pub fn covers(&self, requested: &Scope) -> bool {
         match (self, requested) {
             (Scope::Collection(c), Scope::Collection(rc)) => c == rc,

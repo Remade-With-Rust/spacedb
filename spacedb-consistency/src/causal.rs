@@ -34,7 +34,8 @@ impl CausalSession {
     /// including the write just made (read-your-writes). Returns [`Outcome::Local`]
     /// — written and offline-durable, propagation is asynchronous.
     pub fn record_write(&mut self, doc: &CrdtDoc) -> Outcome {
-        self.token = doc.state_vector();
+        // Into the token's own buffer: no allocation per write once it has grown.
+        doc.state_vector_into(&mut self.token);
         Outcome::Local
     }
 
@@ -44,8 +45,14 @@ impl CausalSession {
     /// If `doc` is behind, the read is honestly [`Outcome::Stale`] and the token
     /// is *not* advanced.
     pub fn read(&mut self, doc: &CrdtDoc) -> Outcome {
-        // One state-vector walk: the comparison and the new token come from the
-        // same transaction. An undecodable token counts as caught up, as before.
+        // Read-your-own-write is the common case: the token IS this replica's
+        // current frontier, byte for byte, and the cached vector says so without
+        // decoding. Otherwise one state-vector walk decides; a caught-up read
+        // takes the (cached) current vector as its new token. An undecodable
+        // token counts as caught up, as before.
+        if !self.token.is_empty() && doc.state_vector_is(&self.token) {
+            return Outcome::Committed(Tier::Causal);
+        }
         let caught_up = if self.token.is_empty() {
             Ok(doc.state_vector())
         } else {

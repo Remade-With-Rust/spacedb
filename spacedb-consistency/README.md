@@ -17,7 +17,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dependencies]
-spacedb-consistency = "0.5"
+spacedb-consistency = "0.7"
 ```
 
 ## The three tiers
@@ -87,6 +87,14 @@ splitting.
 ## Open-core boundary
 
 Depends only on [`spacedb-crdt`](https://github.com/Remade-With-Rust/spacedb/tree/HEAD/spacedb-crdt). No MATA crate.
+
+## Performance (0.7.2)
+
+Measured on exact instruction counts (callgrind) with deterministic drivers
+whose outputs did not change; release build, 0.7.1 -> 0.7.2:
+exercised by the simulator and SDK drivers.
+
+- Causal tokens compare a cached state vector byte for byte and update in place (`clone_from`).
 
 ## Performance (0.7.0)
 

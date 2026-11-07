@@ -17,7 +17,7 @@ Part of [SpaceDB](https://github.com/Remade-With-Rust/spacedb/blob/HEAD/README.m
 
 ```toml
 [dependencies]
-spacedb-access = "0.5"
+spacedb-access = "0.7"
 ```
 
 ## The model
@@ -99,6 +99,16 @@ deletion.
 
 Identities are ECDSA **P-256 / ES256**, the same primitive as mID — so MATA's
 real mIDs verify here identically, with no MATA dependency in this crate.
+
+## Performance (0.7.2)
+
+Measured on exact instruction counts (callgrind) with deterministic drivers
+whose outputs did not change; release build, 0.7.1 -> 0.7.2:
+`ir_access` 95.6M -> 95.3M (-0.3%); the driver is dominated by ECDSA signing.
+
+- The verified-signature cache is keyed by one hash of key, message and signature, in a set with an identity hasher.
+- `KeyDirectory::generation` (default `None`) lets a `HeldCapability` skip re-reading the issuer's key while the directory is unchanged.
+- `HeldCapability::authorize_collection` and `Capability::covers_collection` check a collection without building a `Scope` per op.
 
 ## Performance (0.7.0)
 

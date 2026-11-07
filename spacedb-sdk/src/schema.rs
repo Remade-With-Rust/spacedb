@@ -3,7 +3,7 @@
 //! place a developer encodes "this is a counter that auto-merges" vs "this username
 //! must be globally unique", and the rest of the SDK routes accordingly.
 
-use std::collections::HashMap;
+use crate::names::NameMap;
 
 use spacedb_consistency::Tier;
 
@@ -42,14 +42,14 @@ pub struct FieldSpec {
 #[derive(Clone, Debug)]
 pub struct Schema {
     collection: String,
-    fields: HashMap<String, FieldSpec>,
+    fields: NameMap<FieldSpec>,
 }
 
 impl Schema {
     pub fn new(collection: impl Into<String>) -> Self {
         Self {
             collection: collection.into(),
-            fields: HashMap::new(),
+            fields: NameMap::default(),
         }
     }
 

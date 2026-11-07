@@ -45,7 +45,7 @@ installs a hardened, pure-Rust allocator by default:
 
 ```toml
 [dependencies]
-spacedb-sdk = "0.5"
+spacedb-sdk = "0.7"
 ```
 
 > **Writing a library rather than an application?** Add
@@ -149,7 +149,7 @@ An unconfigured node should be the hardened one, so this is opt-**out**:
 
 ```toml
 # Bring your own allocator (jemalloc, mimalloc, the system one, …)
-spacedb-sdk = { version = "0.5", default-features = false }
+spacedb-sdk = { version = "0.7", default-features = false }
 ```
 
 That genuinely removes `rusty_alloc` from the dependency graph — not merely from
@@ -159,14 +159,14 @@ API is re-exported either way.
 For the hardened node profile:
 
 ```toml
-spacedb-sdk = { version = "0.5", features = ["secure"] }
+spacedb-sdk = { version = "0.7", features = ["secure"] }
 ```
 
 ### Library authors: opt out
 
 ```toml
 [dependencies]
-spacedb-sdk = { version = "0.5", default-features = false }
+spacedb-sdk = { version = "0.7", default-features = false }
 ```
 
 This is a real Cargo behaviour, not a style preference. A program may contain
@@ -209,7 +209,7 @@ Each crate's README covers its own API, guarantees, and seams.
 
 ---
 
-## Status — Phase 1 complete (performance pass in 0.7.0)
+## Status — Phase 1 complete (performance passes in 0.7.0 and 0.7.2)
 
 All eight milestones built, **fully tested on the native target, zero warnings**:
 
@@ -239,6 +239,79 @@ All eight milestones built, **fully tested on the native target, zero warnings**
   transit), rate-card pricing + agent budgets, a `Settlement` seam (a host plugs
   in `UsageClaim → Maestro → EarningRecord → Iron Bank`); the developer SDK above;
   and the operator console.
+
+## Performance (0.7.2)
+
+0.7.2 is a second instruction-count pass, over fifteen deterministic drivers
+(`examples/ir_*.rs`; three were added for this round). Every change was
+measured alone, kept only if its count fell with the driver's outputs
+unchanged, and reverted with its number recorded otherwise. The baseline is
+0.7.1 re-measured on the same harness, which is why `ir_store` starts lower
+than in the 0.7.0 table below: rusty_zstd 0.4.1 (0.7.1) halved its decode cost.
+
+| driver | 0.7.1 | 0.7.2 | change |
+|---|---:|---:|---:|
+| `ir_txrange` (range scans inside a write transaction) | 11.6M | 7.4M | **-36.1%** |
+| `ir_console` (operator rollups and render) | 68.2M | 45.6M | **-33.1%** |
+| `ir_vector` (1,500 x 64-d, three metrics, top-10) | 33.1M | 23.3M | **-29.8%** |
+| `ir_query` (WASM map-reduce + host-call function) | 33.4M | 27.4M | **-18.0%** |
+| `ir_ops` (CRDT mutations, one transaction each) | 33.9M | 29.7M | -12.7% |
+| `ir_crdt` (every CRDT type + sealed persistence) | 146.3M | 130.8M | -10.6% |
+| `ir_session` (two replicas syncing) | 11.3M | 10.2M | -9.6% |
+| `ir_sdk` (authorize + write + read, 330 ops) | 12.2M | 11.1M | -9.0% |
+| `ir_batch` (the `ir_ops` work in batches) | 15.5M | 14.2M | -8.4% |
+| `ir_sim` (40-replica gossip, causal, quorum, churn) | 1,665.1M | 1,635.1M | -1.8% |
+| `ir_claims` (usage claims through the SDK) | 14.4M | 14.2M | -1.6% |
+| `ir_store` (sealed puts, gets, ranges; in-memory engine) | 194.1M | 191.2M | -1.5% |
+| `ir_redb` (the same work on redb) | 335.0M | 330.4M | -1.4% |
+| `ir_access` (authorize, delegation chains, audit log) | 95.6M | 95.3M | -0.3% |
+| `ir_durability` (erasure encode + reconstruct) | 33.1M | 33.1M | 0.0% |
+| **all fifteen** | **2,702.8M** | **2,599.0M** | **-3.8%** |
+
+Where it came from:
+
+- **Work no one used.** CRDT mutations no longer run a yrs cleanup observer
+  that cloned three structures per transaction; each mutation finishes its own
+  transaction, and one known to insert skips the state-vector comparison.
+  Counter keys and values are written without the formatter.
+- **Work done once.** `CrdtDoc::batch` runs many mutations in one transaction
+  (the batch driver does the ops driver's work in under half the
+  instructions). A redb transaction opens each table once, not once per row.
+  A query hashes its snapshot and each module once, and the function linker is
+  built once per runtime. Counter reads, set membership and
+  `encode_update_since` answers are remembered until the document changes.
+- **Borrowing instead of copying.** Range scans lend rows to a visitor
+  (`Readable::range_with`), presence checks no longer copy the row
+  (`Readable::contains_raw`), and collections take borrowed keys (`put_by`,
+  `contains_key_by`, `get_with_by`).
+- **Cheaper hashing and interning.** Short internal keys hash with FNV or an
+  identity hasher instead of SipHash; the console interns names and builds
+  its ordered maps once.
+- **Vector kernels.** Dot product and L2 run on eight independent
+  accumulators, so the compiler vectorizes them.
+
+Behaviour that changed:
+
+- Vector scores are summed in eight lanes, so an `f32` score can differ from
+  0.7.1 in its last bits. Rankings in the test corpus are identical; two
+  candidates within that rounding of each other could swap places.
+- New rows are written without zstd's content checksum, because the AEAD tag
+  already authenticates them. Earlier versions read these rows unchanged, and
+  0.7.2 still reads rows written with the checksum.
+- A redb transaction keeps each table open from first use until it ends.
+
+New, all additive: `CrdtDoc::batch` with `Batch`, `CrdtDoc::state_vector_is`
+and `state_vector_into`, `Readable::contains_raw` and `range_with` (with
+defaults), `Collection::put_by` / `contains_key_by` / `get_with_by`,
+`KeyDirectory::generation` (default `None`),
+`HeldCapability::authorize_collection`, `Capability::covers_collection`,
+`PinnedRecords`, `FunctionCtx::with_pinned`, `FunctionRuntime::run_prehashed`.
+`cargo semver-checks` against 0.7.1 passes on all twelve crates.
+
+Dependencies: spacedb-sdk now pins `rusty_alloc-api` 2.4.0 (from 2.2.6), the
+latest release; spacedb-store adds `self_cell` 1 so a redb transaction can
+hold its open tables without unsafe code. Further wins measured inside yrs,
+primeorder and rusty_zstd are not in this release or in these numbers.
 
 ## Performance (0.7.0)
 
